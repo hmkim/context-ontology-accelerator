@@ -78,6 +78,37 @@ else
   warn "No container engine running (docker/finch) — local pip bundling must succeed"
 fi
 
+# ── 3b. arm64 build capability ───────────────────────────────────────────
+# All container images target linux/arm64 (Amazon Bedrock AgentCore Runtime
+# only supports arm64; the ECS Fargate and Lambda compute is arm64 by design).
+# When the build host is not arm64, Docker must be able to emulate it (buildx +
+# QEMU/binfmt) — otherwise native extensions (e.g. pydantic_core) are silently
+# built for the wrong architecture and the container fails at RUNTIME, not build
+# time, with a cryptic:
+#   ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'
+# This check surfaces that class of failure early. It only warns (never blocks):
+# a CI pipeline that supplies pre-built images via the *_image_uri CDK context
+# does not build locally and is unaffected.
+if [ -n "$CONTAINER_ENGINE" ]; then
+  HOST_ARCH="$(uname -m)"
+  if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
+    ok "Host is arm64 ($HOST_ARCH) — native image builds match the target arch"
+  elif docker buildx inspect 2>/dev/null | grep -q 'linux/arm64'; then
+    ok "buildx can target linux/arm64 (arm64 image builds supported)"
+  elif [ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+    ok "QEMU aarch64 emulation registered (binfmt_misc) — arm64 builds supported"
+  else
+    warn "Build host is $HOST_ARCH with no arm64 emulation (buildx/QEMU) detected."
+    warn "Images target arm64; without emulation, native extensions build for the"
+    warn "wrong arch and the container fails at RUNTIME with:"
+    warn "  ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'"
+    warn "Fix: install QEMU binfmt handlers, e.g."
+    warn "  docker run --privileged --rm tonistiigi/binfmt --install arm64"
+    warn "or build on an arm64 host / arm64 buildx builder."
+    warn "(Ignore if deploying CI pre-built images via the *_image_uri context.)"
+  fi
+fi
+
 # ── 4. Smithy-generated OpenAPI specs ────────────────────────────────────
 OPENAPI_DIR="$REPO_ROOT/smithy-generated/openapi"
 SPEC_COUNT=0

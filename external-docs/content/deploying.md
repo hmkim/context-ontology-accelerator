@@ -15,6 +15,45 @@ This guide walks you through deploying Context Ontology Accelerator into your AW
 | Java | 17+ | Smithy code generation |
 | Docker | — | Container image builds |
 
+### Build Architecture (arm64)
+
+All container images this project builds — the Context Manager / MCP server
+(Bedrock AgentCore Runtime), the VKG (Ontop) ECS service, the ontology-engine
+and document-ingestion tasks — target **`linux/arm64`**:
+
+- **Amazon Bedrock AgentCore Runtime only supports arm64**, so the serve and MCP
+  images *must* be arm64.
+- The ECS Fargate and Lambda compute is arm64 by design (cost/performance).
+
+If your **build host is arm64** (e.g. an Apple Silicon Mac or a Graviton
+instance), builds are native and need no extra setup.
+
+If your **build host is x86_64**, Docker must be able to emulate arm64 —
+otherwise `pip` installs x86_64 wheels for native extensions (e.g.
+`pydantic_core`) into an arm64 image, and the mismatch is **not caught at build
+time**. The container starts, then crashes at runtime with a cryptic error:
+
+```
+ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'
+```
+
+To build arm64 images on an x86_64 host, install the QEMU binfmt handlers once
+per boot:
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+```
+
+Then confirm `docker buildx inspect` lists `linux/arm64` under **Platforms**.
+`scripts/preflight-deploy.sh` also checks for arm64 build capability and warns
+if it is missing.
+
+!!! note "CI with pre-built images"
+    If you supply pre-built images via the `*_image_uri` CDK context values
+    (e.g. from a Graviton CI builder), the local build path is skipped and this
+    requirement does not apply to the deploying host — just ensure the images
+    you push are arm64.
+
 ## AWS Account Setup
 
 Context Ontology Accelerator deploys into a single AWS account and region. Ensure the deploying principal has `AdministratorAccess` or equivalent permissions for the initial deployment.
