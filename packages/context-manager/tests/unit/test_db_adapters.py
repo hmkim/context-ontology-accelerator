@@ -546,6 +546,11 @@ class TestSqlServerAdapter:
         fake.connect.assert_called_once()
         cursor.close.assert_called_once()
         connection.close.assert_called_once()
+        # Full-stream TLS with server-certificate verification: cafile= is what
+        # makes pytds advertise ENCRYPT_ON, which RDS ``rds.force_ssl=1`` demands.
+        kwargs = fake.connect.call_args.kwargs
+        assert kwargs["validate_host"] is True
+        assert kwargs["cafile"].endswith(".pem")
 
     async def test_run_rejects_bind_params(self):
         """The pytds path uses %s paramstyle, not SQLAlchemy :name — reject params loudly."""

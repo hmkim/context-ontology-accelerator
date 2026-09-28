@@ -10,6 +10,9 @@ dependencies = [
     # authorizer and the serve-path query authorizer). arm64 cp312 wheel exists.
     "cedarpy>=4.8.0",
     "cryptography>=50.0.0",
+    # coa_common.tls merges these public CAs with the vendored Amazon RDS CA bundle
+    # for drivers that verify the server certificate (python-tds cafile=).
+    "certifi>=2024.2.2",
     # Shared AOSS vector client (coa_common.opensearch). opensearch-py
     # provides the client + SigV4 signer; requests-aws4auth is a transitive of the
     # RequestsHttpConnection path. Consolidates the per-package clients that

@@ -247,6 +247,17 @@ aws secretsmanager create-secret \
     narrowed from `0.0.0.0/0` to fixed CIDRs with `connector_egress_cidrs`. See the
     internal egress-controls reference for details.
 
+!!! note "SQL Server connections are TLS-encrypted and certificate-verified"
+    Both the discovery scan (python-tds in the db-connector Lambda) and the
+    direct-SQL serve path encrypt the whole SQL Server stream and verify the
+    server certificate against a bundle of the public CAs plus the Amazon RDS
+    CAs, so an RDS for SQL Server instance with `rds.force_ssl = 1` works out of
+    the box. A server whose certificate chains to a private CA needs that CA in
+    PEM form: point the `COA_DB_CA_BUNDLE` environment variable of the
+    db-connector Lambda and the serve runtime at the file (mount or bake it into
+    the image). Self-signed server certificates are rejected — python-tds has no
+    encrypt-without-verify mode.
+
 3. **Database user permissions** — The credential user needs `SELECT` on `information_schema` (or equivalent catalog views) for schema discovery.
 
 !!! tip "Cross-account databases"

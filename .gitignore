@@ -59,6 +59,8 @@ Thumbs.db
 .env
 .env.local
 *.pem
+# Vendored public Amazon RDS CA bundle (not a key) — trusted by coa_common.tls
+!libs/common/src/coa_common/certs/rds-global-bundle.pem
 
 # Local dev runtime config (contains env-specific endpoints and credentials)
 packages/web-app/public/runtime-config.json

@@ -658,6 +658,7 @@ source = { editable = "libs/common" }
 dependencies = [
     { name = "boto3" },
     { name = "cedarpy" },
+    { name = "certifi" },
     { name = "cryptography" },
     { name = "opensearch-py" },
     { name = "pydantic-settings" },
@@ -671,6 +672,7 @@ dependencies = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "cedarpy", specifier = ">=4.8.0" },
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "opensearch-py", specifier = ">=2.5" },
     { name = "pydantic-settings", specifier = ">=2.0" },
@@ -875,6 +877,7 @@ dependencies = [
     { name = "boto3" },
     { name = "botocore" },
     { name = "cedarpy" },
+    { name = "certifi" },
     { name = "coa-common" },
     { name = "graphrag-lexical-graph" },
     { name = "httpx" },
@@ -882,6 +885,7 @@ dependencies = [
     { name = "opensearch-py" },
     { name = "pydantic" },
     { name = "pyjwt" },
+    { name = "pyopenssl" },
     { name = "python-tds" },
     { name = "python-ulid" },
     { name = "rdflib" },
@@ -903,6 +907,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.35" },
     { name = "botocore", specifier = ">=1.35" },
     { name = "cedarpy", specifier = ">=4.8.0" },
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "coa-common", editable = "libs/common" },
     { name = "graphrag-lexical-graph", specifier = "==3.18.7" },
     { name = "httpx", specifier = ">=0.27" },
@@ -910,6 +915,7 @@ requires-dist = [
     { name = "opensearch-py", specifier = ">=2.5" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pyjwt", specifier = ">=2.13.0" },
+    { name = "pyopenssl", specifier = ">=24.0.0" },
     { name = "python-tds", specifier = ">=1.15" },
     { name = "python-ulid", specifier = ">=3.0.0" },
     { name = "rdflib", specifier = ">=7.0" },
@@ -3160,6 +3166,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c9/bc/1c6a92f385940f727daeecf3bacaf186e03875dff57197801046c583bcf0/pymysql-1.2.0.tar.gz", hash = "sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33", size = 49021, upload-time = "2026-05-19T08:26:22.302Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/bd/2534e130295c8cfd4f0a2e31623baab7502278f1e97bcfe61db75656a77f/pymysql-1.2.0-py3-none-any.whl", hash = "sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0", size = 45716, upload-time = "2026-05-19T08:26:20.974Z" },
+]
+
+[[package]]
+name = "pyopenssl"
+version = "26.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3f/e8/7325d258199b159eb2c03fe32107533e2832e70e63f4fb88a6aa00023201/pyopenssl-26.4.0.tar.gz", hash = "sha256:28dfcce0162b9211413e26dfbfdf1d24317fbeba18fc93c12400a1856b2a0bc7", size = 182046, upload-time = "2026-08-01T19:50:50.512Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/ad/2cf6d3fa2fae5c79e1ed9960c0d42badd0f94d81dd12b50604cdc839e648/pyopenssl-26.4.0-py3-none-any.whl", hash = "sha256:f0eb0cb2d581d3ad2b9c489468485e7f2ab6727d08401bcf9d824c3caddf3c1c", size = 56026, upload-time = "2026-08-01T19:50:48.94Z" },
 ]
 
 [[package]]

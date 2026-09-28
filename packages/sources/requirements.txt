@@ -10,4 +10,6 @@ pg8000>=1.31.5
 pymysql>=1.2.0           # MySQL
 oracledb>=2.5.1          # Oracle (thin mode — no Oracle client needed)
 python-tds>=1.17.1       # SQL Server (import: pytds — pure Python, no ODBC)
+pyOpenSSL>=24.0.0        # python-tds full-stream TLS (cafile) needs the OpenSSL binding
+certifi>=2024.2.2        # public CAs merged with the vendored RDS bundle (coa_common.tls)
 snowflake-connector-python>=3.18.1  # Snowflake (needs a warehouse in config; heavier bundle)

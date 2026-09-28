@@ -334,6 +334,25 @@ class TestConnectLazyImports:
         mod = self._run_connect(SqlServerDialect(), "pytds", "connect")
         assert mod.connect.call_args.kwargs["server"] == "h.example.com"
 
+    def test_sqlserver_enables_full_stream_tls_with_ca_verification(self):
+        """cafile= flips pytds to ENCRYPT_ON; without it RDS ``rds.force_ssl=1`` refuses the login."""
+        mod = self._run_connect(SqlServerDialect(), "pytds", "connect")
+        kwargs = mod.connect.call_args.kwargs
+        assert kwargs["validate_host"] is True
+        assert kwargs["cafile"].endswith(".pem")
+        from pathlib import Path
+
+        assert "-----BEGIN CERTIFICATE-----" in Path(kwargs["cafile"]).read_text()
+
+    def test_sqlserver_honours_operator_ca_bundle(self, monkeypatch, tmp_path):
+        from coa_common import tls
+
+        custom = tmp_path / "corp.pem"
+        custom.write_text("x")
+        monkeypatch.setenv(tls.CA_BUNDLE_ENV, str(custom))
+        mod = self._run_connect(SqlServerDialect(), "pytds", "connect")
+        assert mod.connect.call_args.kwargs["cafile"] == str(custom)
+
     def test_oracle_uses_oracledb_dsn(self):
         mod = self._run_connect(OracleDialect(), "oracledb", "connect")
         assert mod.connect.call_args.kwargs["dsn"] == "h.example.com:1/db"

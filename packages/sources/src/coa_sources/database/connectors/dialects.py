@@ -702,10 +702,26 @@ class SqlServerDialect(InformationSchemaDialect):
     system_schema_pattern = r"^(sys|INFORMATION_SCHEMA|guest|db_.*)$"
 
     def connect(self, *, host, port, database, user, password, options=None):
-        """Open a SQL Server connection via the pure-Python python-tds driver."""
-        import pytds  # type: ignore[import-untyped]  # noqa: PLC0415
+        """Open a TLS-encrypted SQL Server connection via the pure-Python python-tds driver.
 
-        return pytds.connect(server=host, port=port, database=database, user=user, password=password)
+        ``cafile`` switches pytds from ``ENCRYPT_NOT_SUP`` to ``ENCRYPT_ON``: the
+        whole stream is encrypted and the server certificate is verified against
+        the bundle (public CAs + Amazon RDS CAs, or ``COA_DB_CA_BUNDLE``). Without
+        it a server that enforces encryption (RDS ``rds.force_ssl=1``) rejects
+        the login outright.
+        """
+        import pytds  # type: ignore[import-untyped]  # noqa: PLC0415
+        from coa_common.tls import db_ca_bundle_path  # noqa: PLC0415
+
+        return pytds.connect(
+            server=host,
+            port=port,
+            database=database,
+            user=user,
+            password=password,
+            cafile=db_ca_bundle_path(),
+            validate_host=True,
+        )
 
     def _limited_distinct_sql(self, q_col: str, q_schema: str, q_table: str, where: str, limit: int) -> str:
         # SQL Server has no LIMIT clause — row-limiting uses SELECT TOP N.

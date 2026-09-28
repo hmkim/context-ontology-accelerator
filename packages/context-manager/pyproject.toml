@@ -27,6 +27,10 @@ dependencies = [
     # mirrors the discovery-side SqlServerDialect).
     "aiomysql>=0.2",
     "python-tds>=1.15",
+    # python-tds full-stream TLS (cafile=) needs pyOpenSSL; certifi supplies the
+    # public CAs that coa_common.tls merges with the vendored Amazon RDS bundle.
+    "pyOpenSSL>=24.0.0",
+    "certifi>=2024.2.2",
     "sqlglot>=25.0",
     "botocore>=1.35",
     "rdflib>=7.0",

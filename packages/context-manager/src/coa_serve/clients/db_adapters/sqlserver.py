@@ -96,18 +96,16 @@ class SqlServerAdapter(EngineAdapter):
 
         def _connect_execute() -> tuple[list[dict[str, Any]], list[str]]:
             import pytds  # noqa: PLC0415
+            from coa_common.tls import db_ca_bundle_path  # noqa: PLC0415
 
-            # TLS: pytds encrypts the LOGIN handshake by default (enc_login_only)
-            # but leaves the DATA stream plaintext unless the server REQUIRES
-            # encryption OR a ``cafile`` is supplied. We deliberately pass no
-            # ``cafile``: pytds only offers full-stream TLS *with* CA/hostname
-            # verification, and source endpoints (RDS/managed SQL Server) commonly
-            # present certs that don't chain to the container trust store — the same
-            # reason base.build_ssl_context uses CERT_NONE for the other engines.
-            # The security boundary is therefore credentials + VPC/SG network
-            # isolation, not TLS peer-identity (matches the asyncpg/aiomysql posture;
-            # see base.build_ssl_context). A future hardening step could bundle the
-            # AWS RDS/SQL Server CA and pass ``cafile`` to encrypt the data channel.
+            # TLS: without ``cafile`` pytds advertises ENCRYPT_NOT_SUP, leaves the
+            # data stream plaintext, and is refused outright by a server that
+            # enforces encryption (RDS ``rds.force_ssl=1``). Passing ``cafile``
+            # encrypts the whole stream and verifies the server certificate
+            # against coa_common.tls's bundle — public CAs plus the Amazon RDS
+            # CAs, or the operator's own PEM via ``COA_DB_CA_BUNDLE``. This is
+            # stricter than base.build_ssl_context (CERT_NONE) for the other
+            # engines because pytds offers no encrypt-without-verify mode.
             # timeout = per-query server-side abort; login_timeout bounds connect.
             connection = pytds.connect(
                 server=creds.host,
@@ -115,6 +113,8 @@ class SqlServerAdapter(EngineAdapter):
                 database=creds.database,
                 user=creds.username,
                 password=creds.password,
+                cafile=db_ca_bundle_path(),
+                validate_host=True,
                 autocommit=True,
                 login_timeout=_LOGIN_TIMEOUT_S,
                 timeout=int(timeout_seconds),
