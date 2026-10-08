@@ -57,6 +57,7 @@ from .session_metadata import SessionMetadataStore
 from .sse_emitter import SSEEmitter
 from .step_ids import StepId
 from .tier1.metric_resolver import MetricResolver
+from .tier2.mapping_schemas import MappingSchemaResolver
 from .tier2.nl_to_sql.agentic_strategy import AgenticStrategy
 from .tier2.nl_to_sql.sql_generator import SQLGenerator
 from .tier2.nl_to_sql.strategy import NLtoSQLStrategy
@@ -329,6 +330,15 @@ async def _ensure_initialized():
             vector_client=opensearch_client,
             oss_ontology_index=oss_ontology_index,
         )
+        # Per-table source schemas from the namespace's published R2RML (the same
+        # object the VKG reloads on accept). Lets the NL->SQL path qualify bare
+        # table references exactly — required on SQL Server, whose login default
+        # schema (dbo) is the only thing a bare name can resolve against. Unset
+        # bucket -> resolver disabled -> previous behaviour.
+        mapping_schemas = MappingSchemaResolver(
+            os.environ.get("ONTOLOGY_ARTIFACTS_BUCKET"),
+            prefix=os.environ.get("ONTOLOGY_PREFIX", "ontologies/"),
+        )
         nl_to_sql_strategy = NLtoSQLStrategy(
             sql_generator=sql_generator,
             firewall=firewall,
@@ -340,6 +350,7 @@ async def _ensure_initialized():
             # path on retrieval alone rather than failing.
             graph_client=neptune_client,
             sources_registry=sources_registry,
+            mapping_schemas=mapping_schemas,
         )
         # Bounded tool-use agent (iterative schema discovery → generate → execute →
         # self-correct). OPT-IN only: it runs solely when a request pins

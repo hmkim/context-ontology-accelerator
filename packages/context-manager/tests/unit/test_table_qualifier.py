@@ -612,10 +612,35 @@ class TestRestoreSourceSchemas:
         sql = 'SELECT id FROM "other"."things"'
         assert restore_source_schemas(sql, self._SYNTHETIC) == sql
 
-    def test_bare_reference_left_alone(self):
-        """A bare reference carries no schema to correct."""
+    def test_bare_reference_gets_its_routing_schema(self):
+        """A bare reference is qualified with the real schema its routing carries.
+
+        The mapping emits ``rr:tableName`` bare for a name unique in the namespace
+        and the NL->SQL prompt shows bare names; SQL Server has no ``search_path``,
+        so a bare name outside the login's default schema (``dbo``) failed with
+        "Invalid object name". PostgreSQL only worked because its adapter sets
+        ``search_path``. A qualified name is valid on every engine.
+        """
+        out = restore_source_schemas("SELECT id FROM customers", self._SYNTHETIC)
+        assert out == 'SELECT id FROM "public".customers'
+
+    def test_bare_reference_without_routing_schema_left_alone(self):
+        routing = {"customers": {"datasourceId": "src-pg"}}
         sql = "SELECT id FROM customers"
+        assert restore_source_schemas(sql, routing) == sql
+
+    def test_unrouted_bare_reference_left_alone(self):
+        sql = "SELECT id FROM things"
         assert restore_source_schemas(sql, self._SYNTHETIC) == sql
+
+    def test_bare_reference_qualified_is_idempotent(self):
+        once = restore_source_schemas("SELECT id FROM customers", self._SYNTHETIC)
+        assert restore_source_schemas(once, self._SYNTHETIC) == once
+
+    def test_bare_cte_name_is_not_qualified(self):
+        routing = {"public.customers": {"datasourceId": "src-pg", "sourceSchema": "public"}}
+        sql = "WITH customers AS (SELECT 1 AS id) SELECT id FROM customers"
+        assert restore_source_schemas(sql, routing) == sql
 
     def test_empty_routing_is_a_noop(self):
         sql = 'SELECT id FROM "public__2f77729f"."customers"'
@@ -692,8 +717,20 @@ class TestPrepareExecutionSQL:
         assert "payments" in prepared.error
         reg.get_source.assert_not_awaited()
 
-    async def test_single_source_statement_passes_through(self):
+    async def test_single_source_statement_gets_schema_but_no_catalog(self):
+        """One source, one schema: the bare reference is schema-qualified (so it runs
+        on an engine without a default-schema switch) but NOT catalog-qualified, and
+        no registry read happens — the statement stays on the direct-JDBC route."""
         routing = _routing(("claims", "src-1", "public"))
+        reg = _registry({"src-1": {"athenaDataCatalogName": "pg_cat"}})
+        prepared = await prepare_execution_sql("SELECT 1 FROM claims", routing, reg, namespace="ns")
+        assert prepared.error is None
+        assert "public" in _unquoted(prepared.sql) and "claims" in _unquoted(prepared.sql)
+        assert "pg_cat" not in prepared.sql
+        reg.get_source.assert_not_awaited()
+
+    async def test_single_source_statement_without_schema_passes_through(self):
+        routing = {"claims": {"datasourceId": "src-1"}}
         reg = _registry({"src-1": {"athenaDataCatalogName": "pg_cat"}})
         prepared = await prepare_execution_sql("SELECT 1 FROM claims", routing, reg, namespace="ns")
         assert prepared == type(prepared)(sql="SELECT 1 FROM claims")

@@ -373,6 +373,14 @@ def restore_source_schemas(
 
     Returns ``sql`` unchanged when there is nothing to restore, and is
     idempotent: a reference already carrying its real schema is left alone.
+
+    A BARE reference is also qualified here when its routing entry (unambiguous,
+    see :func:`_routing_index`) carries a ``sourceSchema``: the mapping emits
+    ``rr:tableName`` bare for a name unique within the namespace and the NL->SQL
+    prompt shows bare names, but SQL Server has no per-session default-schema
+    switch, so a bare name outside the login's default schema (``dbo``) fails
+    with "Invalid object name". PostgreSQL masked this via ``search_path``. A
+    bare name with no routing entry, or an entry without a schema, stays bare.
     """
     if not table_routing:
         return sql
@@ -386,9 +394,8 @@ def restore_source_schemas(
 
     lookup, ambiguous_bare = _routing_index(table_routing)
     restored: list[tuple[exp.Table, str]] = []
+    qualified_bare = 0
     for table in real_tables(parsed):
-        if not table.db:
-            continue
         # A synthetic token whose BARE name is claimed by more than one target
         # (two datasources, or two schemas of one source, sharing the real
         # schema+table) must NOT be restored here. Restoring it collapses the two
@@ -400,8 +407,32 @@ def restore_source_schemas(
         # AND the catalog attributed together.
         if table.name.lower() in ambiguous_bare:
             continue
-        # Only the QUALIFIED key can carry a logical schema: a bare reference has
-        # no schema to correct.
+        if not table.db:
+            # A BARE reference gets the real schema its routing entry carries. The
+            # mapping emits ``rr:tableName`` bare for every table whose name is
+            # unique within the namespace, and the LLM copies the bare name it saw
+            # in the schema context, so on an engine with no session default-schema
+            # switch (SQL Server has no ``search_path``; the login's default schema
+            # is ``dbo``) every such statement failed with "Invalid object name"
+            # whenever the tables live in another schema. PostgreSQL only worked
+            # because its adapter sets ``search_path``. A qualified name is valid
+            # on every engine, so the rewrite is applied uniformly; a bare name the
+            # routing does not know, or knows without a ``sourceSchema``, is left
+            # alone (today's behaviour).
+            entry = lookup.get(table.name.lower())
+            if entry is None:
+                continue
+            real = entry.get("sourceSchema", "")
+            if not real:
+                continue
+            if not _IDENTIFIER_PATTERN.match(real):
+                logger.warning("schema_restore_invalid_identifier", table=table.name)
+                continue
+            restored.append((table, real))
+            qualified_bare += 1
+            continue
+        # Only the QUALIFIED key can carry a logical schema: the real schema is
+        # swapped in for the synthetic token.
         entry = lookup.get(f"{table.db.lower()}.{table.name.lower()}")
         if entry is None:
             continue
@@ -417,7 +448,11 @@ def restore_source_schemas(
         return sql
     for table, real in restored:
         table.set("db", exp.to_identifier(real, quoted=True))
-    logger.info("logical_schema_restored", tables_restored=len(restored))
+    logger.info(
+        "logical_schema_restored",
+        tables_restored=len(restored) - qualified_bare,
+        bare_tables_qualified=qualified_bare,
+    )
     return parsed.sql(dialect=dialect)
 
 
