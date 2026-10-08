@@ -63,6 +63,7 @@ def test_emit_called_once_on_duplicate_shortcircuit() -> None:
     """The duplicate-fingerprint path returns early — metrics must still emit once."""
     from coa_ontology.induce_catalog import (
         WorkbenchInductionRequest,
+        _compute_curation_fingerprint,
         _compute_structural_fingerprint,
         _jobs,
         _run_induction,
@@ -73,11 +74,16 @@ def test_emit_called_once_on_duplicate_shortcircuit() -> None:
     _jobs["job-dup-metrics"] = job
 
     tables = [_tbl("customers", [CatalogColumn(name="id", dataType="INTEGER")])]
-    fingerprint = _compute_structural_fingerprint(tables)
+    # A duplicate is an accepted proposal whose structure AND curated text both
+    # match the current run; a row with no curation fingerprint is deliberately
+    # NOT a duplicate (see _is_duplicate_of), so the fixture must carry both.
     existing_accepted = {
         "proposal_id": "accepted-proposal-123",
         "ontology_id": "http://test.org/ontology/induced#",
-        "metadata": {"structural_fingerprint": fingerprint},
+        "metadata": {
+            "structural_fingerprint": _compute_structural_fingerprint(tables),
+            "curation_fingerprint": _compute_curation_fingerprint(tables),
+        },
     }
     body = WorkbenchInductionRequest(
         datasource_ids=["ds-1"],
