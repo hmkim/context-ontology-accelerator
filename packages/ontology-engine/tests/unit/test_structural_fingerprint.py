@@ -14,7 +14,11 @@ the same insurance schema.
 from __future__ import annotations
 
 import pytest
-from coa_ontology.induce_catalog import _compute_structural_fingerprint
+from coa_ontology.induce_catalog import (
+    _compute_curation_fingerprint,
+    _compute_structural_fingerprint,
+    _is_duplicate_of,
+)
 from coa_ontology.inducer.services.data_catalog import (
     CatalogColumn,
     CatalogConstraint,
@@ -90,3 +94,66 @@ class TestFingerprintCanonicalization:
         a = _tbl("a", [CatalogColumn(name="id", dataType="INT")])
         b = _tbl("b", [CatalogColumn(name="id", dataType="INT")])
         assert _compute_structural_fingerprint([a, b]) == _compute_structural_fingerprint([b, a])
+
+
+class TestCurationFingerprint:
+    """Steward text (descriptions, synonyms) is hashed separately from structure."""
+
+    def _pair(self):
+        before = _tbl(
+            "condition_occurrence",
+            [
+                CatalogColumn(name="person_id", dataType="int"),
+                CatalogColumn(name="condition_concept_id", dataType="int"),
+            ],
+        )
+        after = _tbl(
+            "condition_occurrence",
+            [
+                CatalogColumn(name="person_id", dataType="int"),
+                CatalogColumn(
+                    name="condition_concept_id",
+                    dataType="int",
+                    description="표준 진단 개념 ID. 제2형 당뇨병 = 201826 및 하위 개념",
+                    synonyms=["진단 코드"],
+                ),
+            ],
+        )
+        after.description = "진단(상병) 기록. 당뇨 활성 환자 = 최근 12개월 T2DM 진단"
+        after.synonyms = ["진단", "상병"]
+        return before, after
+
+    def test_structure_unchanged_by_curation(self):
+        before, after = self._pair()
+        assert _compute_structural_fingerprint([before]) == _compute_structural_fingerprint([after])
+
+    def test_curation_changes_the_curation_fingerprint(self):
+        before, after = self._pair()
+        assert _compute_curation_fingerprint([before]) != _compute_curation_fingerprint([after])
+
+    def test_whitespace_and_synonym_order_do_not_matter(self):
+        a = _tbl("t", [CatalogColumn(name="c", dataType="int", description=" x ", synonyms=["b", "a"])])
+        b = _tbl("t", [CatalogColumn(name="c", dataType="int", description="x", synonyms=["a", "b"])])
+        assert _compute_curation_fingerprint([a]) == _compute_curation_fingerprint([b])
+
+    def test_table_order_independent(self):
+        a = _tbl("a", [CatalogColumn(name="c", dataType="int")])
+        b = _tbl("b", [CatalogColumn(name="c", dataType="int")])
+        assert _compute_curation_fingerprint([a, b]) == _compute_curation_fingerprint([b, a])
+
+
+class TestDuplicateDecision:
+    def test_same_structure_and_curation_is_duplicate(self):
+        assert _is_duplicate_of({"structural_fingerprint": "s1", "curation_fingerprint": "c1"}, "s1", "c1") is True
+
+    def test_same_structure_different_curation_is_not_duplicate(self):
+        """The steward edited descriptions and re-induced: a new proposal must be built."""
+        meta = {"structural_fingerprint": "s1", "curation_fingerprint": "c1"}
+        assert _is_duplicate_of(meta, "s1", "c2") is False
+
+    def test_different_structure_is_not_duplicate(self):
+        assert _is_duplicate_of({"structural_fingerprint": "s1", "curation_fingerprint": "c1"}, "s2", "c1") is False
+
+    def test_legacy_proposal_without_curation_fingerprint_is_not_duplicate(self):
+        """Nothing proves a pre-upgrade accepted proposal's text matches the catalog now."""
+        assert _is_duplicate_of({"structural_fingerprint": "s1"}, "s1", "c1") is False
