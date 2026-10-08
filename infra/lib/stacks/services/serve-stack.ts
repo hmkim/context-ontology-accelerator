@@ -485,6 +485,15 @@ export class ServeStack extends SCLStack {
           AWS_REGION: region,
           NEPTUNE_ENDPOINT: props.neptuneEndpoint,
           VKG_ENDPOINT: props.vkgEndpoint,
+          // Published R2RML mappings (ontologies/<ns>/latest/mappings.r2rml) — the
+          // NL->SQL path reads per-table source schemas from them so bare table
+          // references are qualified before execution (SQL Server has no
+          // search_path). Read-only; the role already has s3:GetObject on it.
+          ONTOLOGY_ARTIFACTS_BUCKET: cdk.Fn.select(
+            5,
+            cdk.Fn.split(":", props.ontologyBucketArn),
+          ),
+          ONTOLOGY_PREFIX: "ontologies/",
           OPENSEARCH_ENDPOINT: opensearchEndpoint,
           // TODO(aoss-proxy): Remove when AgentCore supports AOSS directly
           OPENSEARCH_PROXY_LAMBDA_ARN: aossProxyFn.functionArn,
