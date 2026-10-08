@@ -204,7 +204,102 @@ _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
             "ORDER BY total_revenue DESC"
         ),
     },
+    "redshift": {
+        "engine_description": "Amazon Redshift (PostgreSQL-derived SQL dialect)",
+        "syntax_rules": (
+            "- Use Redshift SQL syntax (PostgreSQL-like: DATE_TRUNC, EXTRACT, DATEADD, DATEDIFF)\n"
+            "- For date filtering, use ISO format strings (e.g. '2024-01-01'::date)\n"
+            "- Use DECIMAL for decimals, VARCHAR for strings; no arrays or generate_series\n"
+            "- String concatenation: use || operator"
+        ),
+        "example_sql": (
+            "SELECT\n"
+            "  c.region,\n"
+            "  COALESCE(SUM(o.total), 0) AS total_revenue\n"
+            "FROM orders o\n"
+            "JOIN customers c ON o.customer_id = c.id\n"
+            "WHERE o.order_date >= '2024-01-01'::date\n"
+            "  AND o.order_date < '2025-01-01'::date\n"
+            "GROUP BY c.region\n"
+            "ORDER BY total_revenue DESC"
+        ),
+    },
+    "mysql": {
+        "engine_description": "MySQL",
+        "syntax_rules": (
+            "- Use MySQL syntax (e.g. DATE_FORMAT, DATE_ADD, DATE_SUB, YEAR(), MONTH())\n"
+            "- For date filtering, use plain ISO date strings (e.g. '2024-01-01'); no DATE '...' "
+            "literal prefix and no ::date casts\n"
+            "- Use DECIMAL for decimals, VARCHAR for strings\n"
+            "- String concatenation: use CONCAT() function, not || operator\n"
+            "- Row limiting: LIMIT n"
+        ),
+        "example_sql": (
+            "SELECT\n"
+            "  c.region,\n"
+            "  COALESCE(SUM(o.total), 0) AS total_revenue\n"
+            "FROM orders o\n"
+            "JOIN customers c ON o.customer_id = c.id\n"
+            "WHERE o.order_date >= '2024-01-01'\n"
+            "  AND o.order_date < '2025-01-01'\n"
+            "GROUP BY c.region\n"
+            "ORDER BY total_revenue DESC"
+        ),
+    },
+    "tsql": {
+        "engine_description": "Microsoft SQL Server (T-SQL dialect)",
+        "syntax_rules": (
+            "- Use T-SQL syntax (e.g. DATEADD, DATEDIFF, DATEPART, GETDATE(), CAST/CONVERT, "
+            "STRING_AGG); there is no DATE_TRUNC, APPROX_DISTINCT, ARRAY_AGG or ::type cast\n"
+            "- For date filtering, use CAST('2024-01-01' AS DATE); NEVER a DATE '...' literal "
+            "prefix (invalid in T-SQL)\n"
+            "- Row limiting: SELECT TOP n ... (LIMIT is invalid; OFFSET/FETCH requires ORDER BY). "
+            "Where a rule above says LIMIT 1, write SELECT TOP 1\n"
+            "- Qualify every table as schema.table exactly as shown in the schema context "
+            "(e.g. sales.orders); never add a database name (no three-part names)\n"
+            "- Use DECIMAL for decimals, VARCHAR/NVARCHAR for strings; integer division truncates, "
+            "so CAST to DECIMAL before dividing for rates/percentages\n"
+            "- String concatenation: use CONCAT() function or +, not || operator"
+        ),
+        "example_sql": (
+            "SELECT\n"
+            "  c.region,\n"
+            "  COALESCE(SUM(o.total), 0) AS total_revenue\n"
+            "FROM sales.orders o\n"
+            "JOIN sales.customers c ON o.customer_id = c.id\n"
+            "WHERE o.order_date >= CAST('2024-01-01' AS DATE)\n"
+            "  AND o.order_date < CAST('2025-01-01' AS DATE)\n"
+            "GROUP BY c.region\n"
+            "ORDER BY total_revenue DESC"
+        ),
+    },
 }
+
+# The strategy resolves the dialect from the JDBC adapter registry
+# (``EngineAdapter.sqlglot_dialect``: "postgres", "redshift", "mysql", "tsql"), while the
+# prompt configs above are keyed by the names the public API documents
+# ("postgresql", "athena"). Without this map a "postgres" source silently got the
+# Athena/Trino prompt (harmless: the syntax overlaps) and a "tsql" source got Trino
+# ``DATE '...'`` literals and ``LIMIT`` that SQL Server rejects on every first shot.
+_DIALECT_ALIASES: dict[str, str] = {
+    "postgres": "postgresql",
+    "sqlserver": "tsql",
+    "mssql": "tsql",
+    "trino": "athena",
+    "presto": "athena",
+}
+
+
+def resolve_dialect_key(dialect: str | None) -> str:
+    """Map a dialect name (sqlglot or public) onto a ``_DIALECT_CONFIGS`` key.
+
+    Unknown or empty names fall back to ``"athena"``, preserving the historical
+    default for federated / Glue / ambiguous sources.
+    """
+    key = (dialect or "").strip().lower()
+    key = _DIALECT_ALIASES.get(key, key)
+    return key if key in _DIALECT_CONFIGS else "athena"
+
 
 _SHARED_RULES = (
     "- Use ONLY the tables and columns provided in the schema — NEVER invent names\n"
@@ -260,8 +355,8 @@ _EXAMPLE_SCHEMA = (
 
 
 def _build_system_prompt(dialect: str) -> str:
-    """Build the system prompt for the given SQL dialect."""
-    config = _DIALECT_CONFIGS.get(dialect, _DIALECT_CONFIGS["athena"])
+    """Build the system prompt for the given SQL dialect (sqlglot or public name)."""
+    config = _DIALECT_CONFIGS[resolve_dialect_key(dialect)]
     return (
         f"You are a SQL query generator for a data warehouse running on "
         f"{config['engine_description']}.\n\n"
@@ -722,6 +817,7 @@ class SQLGenerator:
         evidence: str = "",
         model_id: str | None = None,
         governed_metric: str = "",
+        dialect: str | None = None,
     ) -> tuple[str, float]:
         """LLM-driven repair of a SQL statement that failed to execute.
 
@@ -741,6 +837,12 @@ class SQLGenerator:
         forwarded here too: without it the correction re-derives the metric from
         the schema, discarding the governed formula on exactly the retry the writer
         most needs it — the point of #1116.
+
+        ``dialect`` is the same per-request override ``generate`` received. It MUST
+        be forwarded too: the correction otherwise runs under the instance default
+        (Athena) system prompt, so a SQL Server source whose first shot failed on a
+        Trino ``DATE '...'`` literal was "corrected" by a model still told to write
+        Trino SQL.
 
         Returns (corrected_sql, confidence).
         """
@@ -774,9 +876,12 @@ class SQLGenerator:
         )
 
         max_tokens = _resolve_max_output_tokens()
+        # Same per-request dialect resolution as _generate_sql: a correction for a
+        # SQL Server / MySQL source must not be prompted with the Athena default.
+        system_prompt = _build_system_prompt(dialect) if dialect else self._system_prompt
         result: ConverseResult = await self._llm.converse(
             prompt,
-            system=self._system_prompt,
+            system=system_prompt,
             max_tokens=max_tokens,
             temperature=0,
             model_id=model_id,
