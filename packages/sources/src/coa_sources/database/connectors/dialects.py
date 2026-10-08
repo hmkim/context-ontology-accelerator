@@ -11,10 +11,11 @@ primitives, so they stay small and individually testable.
 
 Engines that expose the ANSI ``information_schema`` (PostgreSQL, Redshift,
 MySQL, SQL Server, Snowflake) share :class:`InformationSchemaDialect` and only
-override the driver ``connect`` (and, where the standard FK view is missing,
-like MySQL, ``fetch_constraints``). Oracle has no ``information_schema`` and uses
-its ``ALL_*`` catalog views, so it overrides all the SQL. Snowflake additionally
-needs an active warehouse (passed via ``options``) for its INFORMATION_SCHEMA.
+override the driver ``connect`` (and, where the standard FK view is missing or
+incomplete — MySQL, SQL Server — ``fetch_constraints``). Oracle has no
+``information_schema`` and uses its ``ALL_*`` catalog views, so it overrides all
+the SQL. Snowflake additionally needs an active warehouse (passed via
+``options``) for its INFORMATION_SCHEMA.
 
 Drivers are imported lazily inside ``connect`` so a missing optional driver
 only fails the engine that needs it (and keeps the Lambda bundle lean). All
@@ -814,6 +815,68 @@ class SqlServerDialect(InformationSchemaDialect):
 
     # SQL Server has no LIMIT clause — row-limiting uses SELECT TOP N.
     row_limit_uses_top = True
+
+    def fetch_constraints(self, conn: Any, schema: str, tables: list[str]) -> Constraints:
+        """Discover PK/FK constraints from SQL Server's ``sys.*`` catalog views.
+
+        The inherited ANSI FK query pairs FK columns with their referenced
+        columns through ``key_column_usage.position_in_unique_constraint``. That
+        column is PostgreSQL-only: SQL Server's ``INFORMATION_SCHEMA.KEY_COLUMN_USAGE``
+        does not have it, so the statement fails to compile (``Invalid column name
+        'position_in_unique_constraint'``) on every SQL Server database, with or
+        without foreign keys. ``_safe_constraints`` then swallows the error and the
+        scan continues with NO keys at all — the primary keys fetched just before
+        are discarded along with the foreign keys — so declared constraints never
+        reached the catalog as ``DETERMINISTIC`` keys and only AI inference filled
+        the gap.
+
+        ``sys.foreign_key_columns`` carries the FK-side and referenced-side
+        columns on the same row, so composite keys are paired by position
+        (``constraint_column_id``) without any ANSI view gymnastics. The
+        referenced table is returned by bare name, like every other dialect: a
+        cross-schema reference (``hosp.pt_master.person_id -> cdm.person``)
+        resolves downstream as long as the name is unambiguous within the scan.
+        """
+        if not tables:
+            return {}, {}
+        placeholders = ", ".join(["%s"] * len(tables))
+        params = (schema, *tables)
+        pk: dict[str, list[str]] = {}
+        for table_name, column_name in _run(
+            conn,
+            "SELECT t.name, c.name "
+            "FROM sys.key_constraints kc "
+            "JOIN sys.tables t ON t.object_id = kc.parent_object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "JOIN sys.index_columns ic "
+            "  ON ic.object_id = kc.parent_object_id AND ic.index_id = kc.unique_index_id "
+            "JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+            "WHERE kc.type = 'PK' AND s.name = %s "
+            f"AND t.name IN ({placeholders}) "
+            "ORDER BY t.name, ic.key_ordinal",
+            params,
+        ):
+            pk.setdefault(table_name, []).append(column_name)
+        fk: dict[str, list[tuple[str, str, str]]] = {}
+        for fk_table, fk_col, ref_table, ref_col in _run(
+            conn,
+            "SELECT pt.name, pc.name, rt.name, rc.name "
+            "FROM sys.foreign_keys f "
+            "JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = f.object_id "
+            "JOIN sys.tables pt ON pt.object_id = f.parent_object_id "
+            "JOIN sys.schemas ps ON ps.schema_id = pt.schema_id "
+            "JOIN sys.columns pc "
+            "  ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id "
+            "JOIN sys.tables rt ON rt.object_id = f.referenced_object_id "
+            "JOIN sys.columns rc "
+            "  ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id "
+            "WHERE ps.name = %s "
+            f"AND pt.name IN ({placeholders}) "
+            "ORDER BY pt.name, f.name, fkc.constraint_column_id",
+            params,
+        ):
+            fk.setdefault(fk_table, []).append((fk_col, ref_table, ref_col))
+        return pk, fk
 
     def fetch_descriptions(self, conn: Any, schema: str, tables: list[str]) -> Descriptions:
         """SQL Server descriptions live in sys.extended_properties (MS_Description).
