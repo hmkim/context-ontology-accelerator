@@ -633,6 +633,8 @@ SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES=12 make deploy-dev
 
 Leaving either setting unset leaves the runtime's default in charge; the stack only sets the Serve runtime variable (`SERVE_NL2SQL_GRAPH_EXPAND` / `SERVE_NL2SQL_GRAPH_EXPAND_MAX_TABLES`) when you pass a value. Changing either one is a stack update, not an image rebuild. A single request can also override the deployment setting with `options.flatGraphExpand` (`true` or `false`). An A/B test that compares the expansion on and off must pass `flatGraphExpand: false` for the "off" arm; leaving the option out now means on.
 
+**NL→SQL output budget.** The generation call caps its output at 4,096 tokens by default (`SERVE_NL2SQL_MAX_TOKENS`, clamped to 512–32,768). Reasoning models spend that budget on their thinking blocks too, so a wide multi-table question can stop at `max_tokens` with no SQL text and the Tier-2 arm reports `generate_failed`. Raise it with `-c serve_nl2sql_max_tokens=16384`; it is a stack update, not an image rebuild.
+
 `scripts/deploy.sh` maps the variables above to the CDK context parameters `serve_nl2sql_graph_expand` and `serve_nl2sql_graph_expand_max_tables`. On a direct `cdk deploy`, pass them as context instead — `--context serve_nl2sql_graph_expand=false` — or set them in the `context` block of `infra/cdk.json`.
 
 ### VKG Task Sizing
