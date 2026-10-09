@@ -52,7 +52,9 @@ _DIALECT_ALIASES = {"postgresql": "postgres", "sqlserver": "tsql", "mssql": "tsq
 
 def normalize_dialect(dialect: str | None) -> str:
     """Return a sqlglot read-dialect name for ``dialect`` (default/unknown -> ``"trino"``)."""
-    name = (dialect or "trino").strip().lower()
+    if not isinstance(dialect, str) or not dialect.strip():
+        return "trino"
+    name = dialect.strip().lower()
     name = _DIALECT_ALIASES.get(name, name)
     try:
         sqlglot.Dialect.get_or_raise(name)

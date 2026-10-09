@@ -1116,3 +1116,37 @@ class TestFirewallReceivesEngineDialect:
         ):
             await strategy.resolve("q", "ns", _make_context())
         assert firewall.evaluate.call_args.kwargs.get("dialect") == "tsql"
+
+
+@pytest.mark.unit
+class TestQualificationUsesEngineDialect:
+    @pytest.mark.asyncio
+    async def test_prepare_sql_passes_dialect_to_routing_and_qualifier(self):
+        """A T-SQL-only statement must still get its bare tables qualified: routing and
+        prepare_execution_sql parse with the generation dialect, not the trino default."""
+        sql_generator = AsyncMock()
+        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT TOP 1 x FROM person")
+        firewall = MagicMock()
+        firewall.evaluate.return_value = _make_firewall_result(authorized_sql="SELECT TOP 1 x FROM person")
+        query_executor = AsyncMock()
+        query_executor.resolve_target_dialect = AsyncMock(return_value="tsql")
+        query_executor.execute.return_value = _make_exec_result()
+        strategy = NLtoSQLStrategy(
+            sql_generator=sql_generator, firewall=firewall, query_executor=query_executor, oss_ontology_index="idx"
+        )
+        mapping = MagicMock()
+        mapping.enabled = True
+        mapping.schemas_for = AsyncMock(return_value={"person": "cdm"})
+        strategy._mapping_schemas = mapping
+        with (
+            patch(
+                "coa_serve.tier2.nl_to_sql.strategy.sql_table_routing", return_value={"person": {"sourceSchema": "cdm"}}
+            ) as routing,
+            patch(
+                "coa_serve.tier2.nl_to_sql.strategy.prepare_execution_sql",
+                new=AsyncMock(return_value=PreparedSQL(sql='SELECT TOP 1 x FROM "cdm".person', error=None)),
+            ) as prep,
+        ):
+            await strategy.resolve("q", "ns", _make_context())
+        assert routing.call_args.kwargs.get("dialect") == "tsql"
+        assert prep.call_args.kwargs.get("dialect") == "tsql"
