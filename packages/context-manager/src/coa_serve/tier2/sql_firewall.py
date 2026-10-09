@@ -446,6 +446,7 @@ class SQLFirewall:
         default_catalog: str,
         schema_only: bool = False,
         selected_source_schemas: frozenset[str] = frozenset(),
+        dialect: str = "trino",
     ) -> bool:
         """Authorize qualified table references against one namespace's sources.
 
@@ -459,7 +460,10 @@ class SQLFirewall:
         shared runtime role can see, including other namespaces' sources.
         """
         try:
-            parsed = sqlglot.parse_one(sql, read="trino")
+            # Athena/Redshift callers pass Trino SQL (the default); the direct-JDBC
+            # route passes the engine dialect the statement was generated in, so a
+            # T-SQL-only statement is verified rather than refused as unparseable.
+            parsed = sqlglot.parse_one(sql, read=normalize_dialect(dialect))
         except sqlglot.errors.ParseError as exc:
             raise NamespaceSQLScopeError("Unable to verify SQL references") from exc
 

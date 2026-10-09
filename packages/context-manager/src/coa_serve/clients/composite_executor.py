@@ -167,6 +167,10 @@ class CompositeQueryExecutor:
             # Dialect is derived from the ALREADY-fetched source record (no 2nd lookup).
             # sqlglot.transpile is fast (~μs per statement) — no need for run_in_executor.
             target_dialect = self._target_dialect_for_source(jdbc_source)
+            # The dialect `sql` is WRITTEN in: Trino when the transpile below succeeds,
+            # the engine's own when the statement is accepted verbatim. The scope check
+            # parses the original text and must use this, not the target dialect.
+            statement_dialect = "trino"
             try:
                 transpiled_sql = sqlglot.transpile(sql, read="trino", write=target_dialect, identify=False)[0]
             except sqlglot.errors.SqlglotError as exc:
@@ -185,6 +189,7 @@ class CompositeQueryExecutor:
                 # SQL natively — the same safe path taken when no JDBC executor is
                 # configured. `sql` is post-substitution (potential PII): log length only.
                 transpiled_sql = self._accept_target_dialect_sql(sql, target_dialect)
+                statement_dialect = target_dialect
                 if transpiled_sql is None:
                     logger.warning(
                         "jdbc_trino_transpile_failed_fallback_athena",
@@ -220,7 +225,9 @@ class CompositeQueryExecutor:
                 for schema in (discovered_schemas if isinstance(discovered_schemas, list) else [])
                 if isinstance(schema, str)
             )
-            await self._authorize_qualified_references(sql, namespace, selected_source_schemas)
+            await self._authorize_qualified_references(
+                sql, namespace, selected_source_schemas, dialect=statement_dialect
+            )
             return await self._source_db.execute(  # type: ignore[union-attr]
                 transpiled_sql,
                 namespace=namespace,
@@ -281,6 +288,7 @@ class CompositeQueryExecutor:
         sql: str,
         namespace: str,
         selected_source_schemas: frozenset[str],
+        dialect: str = "trino",
     ) -> None:
         """Deny qualified references outside ``namespace`` before the JDBC route runs.
 
@@ -312,6 +320,7 @@ class CompositeQueryExecutor:
                 # An explicit 3-part name is still checked catalog-strict.
                 schema_only=True,
                 selected_source_schemas=selected_source_schemas,
+                dialect=dialect,
             )
         except NamespaceSQLScopeError as exc:
             logger.warning(
