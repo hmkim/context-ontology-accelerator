@@ -1137,6 +1137,7 @@ class TestQualificationUsesEngineDialect:
         mapping = MagicMock()
         mapping.enabled = True
         mapping.schemas_for = AsyncMock(return_value={"person": "cdm"})
+        mapping.sources_for = AsyncMock(return_value={"person": "src"})
         strategy._mapping_schemas = mapping
         with (
             patch(
