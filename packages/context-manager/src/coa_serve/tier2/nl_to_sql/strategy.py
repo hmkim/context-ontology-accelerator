@@ -684,8 +684,10 @@ class NLtoSQLStrategy:
         # ``table_sources_need_preparation`` distinguishes those from the single
         # unambiguous source that needs nothing done.
         table_schemas: dict[str, str] = {}
+        mapped_sources: dict[str, str] = {}
         if self._mapping_schemas is not None and self._mapping_schemas.enabled:
             table_schemas = await self._mapping_schemas.schemas_for(namespace)
+            mapped_sources = await self._mapping_schemas.sources_for(namespace)
         if not table_schemas and not table_sources_need_preparation(nl_result.table_sources):
             return PreparedSQL(sql=sql)
         # With per-table schemas known, the single-source path runs through the
@@ -697,7 +699,12 @@ class NLtoSQLStrategy:
         # Parse with the dialect the statement was generated in: under the trino
         # default a T-SQL-only statement yields no table references, the routing map
         # comes back empty and the bare names reach the engine unqualified.
-        routing = sql_table_routing(sql, nl_result.table_sources, table_schemas, dialect=dialect)
+        # ``mapped_sources`` attributes a mapped table the retrieval did not return
+        # (a vocabulary table pulled in by the prompt), which would otherwise make
+        # the qualifier abandon the statement as unroutable.
+        routing = sql_table_routing(
+            sql, nl_result.table_sources, table_schemas, dialect=dialect, mapped_sources=mapped_sources
+        )
         return await prepare_execution_sql(sql, routing, self._sources, namespace=namespace, dialect=dialect)
 
     def _firewall_check(

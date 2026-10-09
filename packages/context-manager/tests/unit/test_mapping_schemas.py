@@ -8,7 +8,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from coa_serve.tier2.mapping_schemas import MappingSchemaResolver, table_schemas_from_r2rml
+from coa_serve.tier2.mapping_schemas import (
+    MappingSchemaResolver,
+    table_schemas_from_r2rml,
+    table_sources_from_r2rml,
+)
 
 _R2RML = """
 @prefix rr: <http://www.w3.org/ns/r2rml#> .
@@ -16,12 +20,14 @@ _R2RML = """
 @prefix ind: <https://example.org/ontology/> .
 
 ind:ConditionOccurrenceMap a rr:TriplesMap ;
+    scl:datasourceId "src-a" ;
     scl:sourceSchema "cdm" ;
     rr:logicalTable [ rr:tableName "\\"condition_occurrence\\"" ] ;
     rr:subjectMap [ rr:template "https://example.org/co/{condition_occurrence_id}" ;
                     rr:class ind:ConditionOccurrence ] .
 
 ind:PtMasterMap a rr:TriplesMap ;
+    scl:datasourceId "src-b" ;
     scl:sourceSchema "hosp" ;
     rr:logicalTable [ rr:tableName "\\"pt_master\\"" ] ;
     rr:subjectMap [ rr:template "https://example.org/pt/{patient_id}" ; rr:class ind:PtMaster ] .
@@ -35,10 +41,12 @@ ind:ClaimsMap a rr:TriplesMap ;
 
 # Same bare name in two schemas -> ambiguous, must be dropped.
 ind:NotesA a rr:TriplesMap ;
+    scl:datasourceId "src-a" ;
     scl:sourceSchema "cdm" ;
     rr:logicalTable [ rr:tableName "\\"note\\"" ] ;
     rr:subjectMap [ rr:template "https://example.org/n/{id}" ; rr:class ind:NoteA ] .
 ind:NotesB a rr:TriplesMap ;
+    scl:datasourceId "src-b" ;
     scl:sourceSchema "hosp" ;
     rr:logicalTable [ rr:tableName "\\"note\\"" ] ;
     rr:subjectMap [ rr:template "https://example.org/n2/{id}" ; rr:class ind:NoteB ] .
@@ -70,6 +78,28 @@ class TestTableSchemasFromR2RML:
 
     def test_accepts_bytes(self):
         assert table_schemas_from_r2rml(_R2RML.encode())["pt_master"] == "hosp"
+
+
+@pytest.mark.unit
+class TestTableSourcesFromR2RML:
+    """`scl:datasourceId` on each TriplesMap attributes every mapped table to its source."""
+
+    def test_projects_bare_table_to_datasource(self):
+        sources = table_sources_from_r2rml(_R2RML)
+        assert sources["condition_occurrence"] == "src-a"
+        assert sources["pt_master"] == "src-b"
+
+    def test_bare_name_exposed_by_two_sources_is_dropped(self):
+        assert "note" not in table_sources_from_r2rml(_R2RML)
+
+    def test_triplesmap_without_datasource_is_skipped(self):
+        # ClaimsMap and OrphanMap carry no scl:datasourceId.
+        sources = table_sources_from_r2rml(_R2RML)
+        assert "claims" not in sources
+        assert "orphan" not in sources
+
+    def test_schema_projection_is_unchanged_by_datasource_annotations(self):
+        assert table_schemas_from_r2rml(_R2RML)["claims"] == "sales"
 
 
 def _s3_returning(body: bytes) -> MagicMock:
@@ -117,3 +147,15 @@ class TestMappingSchemaResolver:
     async def test_empty_namespace_is_empty(self):
         resolver = MappingSchemaResolver("bucket", s3_client=_s3_returning(_R2RML.encode()))
         assert await resolver.schemas_for("") == {}
+        assert await resolver.sources_for("") == {}
+
+    async def test_sources_for_shares_the_single_mapping_read(self):
+        s3 = _s3_returning(_R2RML.encode())
+        resolver = MappingSchemaResolver("bucket", s3_client=s3)
+        assert (await resolver.schemas_for("ns-1"))["pt_master"] == "hosp"
+        assert (await resolver.sources_for("ns-1"))["pt_master"] == "src-b"
+        assert "note" not in await resolver.sources_for("ns-1")
+        s3.get_object.assert_called_once()
+
+    async def test_sources_for_disabled_without_bucket(self):
+        assert await MappingSchemaResolver(None).sources_for("ns-1") == {}

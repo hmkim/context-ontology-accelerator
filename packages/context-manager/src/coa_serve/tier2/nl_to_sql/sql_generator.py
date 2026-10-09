@@ -1260,6 +1260,7 @@ def sql_table_routing(
     table_sources: dict[str, str],
     table_schemas: dict[str, str] | None = None,
     dialect: str | None = None,
+    mapped_sources: dict[str, str] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Build a ``datasourceRouting``-shaped map for the tables ``sql`` references.
 
@@ -1286,13 +1287,31 @@ def sql_table_routing(
     the SAME per-table schema the VKG path uses, so ``restore_source_schemas`` can
     qualify a bare reference exactly instead of the qualifier falling back to the
     per-source schema (wrong for a source spanning several schemas).
+
+    The generated SQL may legitimately reference a mapped table that retrieval did
+    NOT return — a vocabulary table (``concept_ancestor``) the prompt's steward
+    descriptions or a forwarded governed-metric definition told the model to use,
+    which the top-k plus a capped FK expansion never surfaced. Such a table has no
+    hit to attribute it, and leaving it out of the map makes the qualifier abandon
+    the whole statement as "no datasource routing metadata" — a hard failure for a
+    query that is in fact single-source and correct. ``mapped_sources``
+    (``{bare_table: datasource_id}`` from the same published R2RML, whose every
+    TriplesMap is annotated with the source it was scanned from) fills exactly
+    that gap: a table absent from the hits but present in the mapping is
+    attributed to its mapped source. Hits keep precedence (including their
+    ambiguity marker), and a table in neither map stays unrouted, so the
+    fail-closed behaviour for a genuinely unknown table is unchanged.
     """
     routing: dict[str, dict[str, str]] = {}
-    if not table_sources:
+    if not table_sources and not mapped_sources:
         return routing
     for qualified in SQLFirewall.extract_tables(sql, dialect or "trino"):
         bare = qualified.split(".")[-1].strip().lower()
         ds_id = table_sources.get(bare)
+        from_mapping = False
+        if not ds_id and mapped_sources:
+            ds_id = mapped_sources.get(bare)
+            from_mapping = bool(ds_id)
         if not ds_id:
             continue
         if ds_id == _AMBIGUOUS_SOURCE:
@@ -1303,6 +1322,8 @@ def sql_table_routing(
         if schema:
             entry["sourceSchema"] = schema
         routing[bare] = entry
+        if from_mapping:
+            logger.info("nl_to_sql_table_routed_from_mapping", table=bare, has_schema=bool(schema))
     return routing
 
 

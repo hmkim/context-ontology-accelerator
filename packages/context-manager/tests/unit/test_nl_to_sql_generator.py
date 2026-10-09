@@ -809,6 +809,52 @@ class TestSqlTableRoutingSchemas:
 
 
 @pytest.mark.unit
+class TestSqlTableRoutingMappedSources:
+    """A mapped table the retrieval did not return is attributed from the published R2RML."""
+
+    _SQL = (
+        "SELECT COUNT(DISTINCT co.person_id) FROM condition_occurrence co "
+        "WHERE co.condition_concept_id IN "
+        "(SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 1)"
+    )
+
+    def test_unretrieved_mapped_table_is_routed_to_its_mapped_source(self):
+        routing = sql_table_routing(
+            self._SQL,
+            {"condition_occurrence": "src"},
+            {"condition_occurrence": "cdm", "concept_ancestor": "cdm"},
+            mapped_sources={"condition_occurrence": "src", "concept_ancestor": "src"},
+        )
+        assert routing["concept_ancestor"] == {"datasourceId": "src", "sourceSchema": "cdm"}
+        assert routing["condition_occurrence"] == {"datasourceId": "src", "sourceSchema": "cdm"}
+
+    def test_hit_attribution_wins_over_mapping(self):
+        routing = sql_table_routing(
+            "SELECT 1 FROM orders", {"orders": "from-hits"}, None, mapped_sources={"orders": "from-mapping"}
+        )
+        assert routing["orders"] == {"datasourceId": "from-hits"}
+
+    def test_hit_ambiguity_marker_is_not_resolved_by_mapping(self):
+        routing = sql_table_routing(
+            "SELECT 1 FROM customers", {"customers": "__ambiguous__"}, None, mapped_sources={"customers": "src"}
+        )
+        assert routing["customers"] == {AMBIGUOUS_KEY: "customers"}
+
+    def test_table_in_neither_map_stays_unrouted(self):
+        routing = sql_table_routing(self._SQL, {"condition_occurrence": "src"}, None, mapped_sources={"other": "src"})
+        assert "concept_ancestor" not in routing
+
+    def test_mapping_alone_routes_when_hits_are_empty(self):
+        routing = sql_table_routing(
+            "SELECT 1 FROM concept_ancestor", {}, None, mapped_sources={"concept_ancestor": "src"}
+        )
+        assert routing == {"concept_ancestor": {"datasourceId": "src"}}
+
+    def test_no_maps_at_all_is_empty(self):
+        assert sql_table_routing("SELECT 1 FROM orders", {}, None, mapped_sources=None) == {}
+
+
+@pytest.mark.unit
 class TestTableSourcesNeedPreparation:
     def test_single_unambiguous_source_skips(self):
         assert table_sources_need_preparation({"orders": "pg", "items": "pg"}) is False
