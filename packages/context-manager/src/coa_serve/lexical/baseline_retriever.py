@@ -38,8 +38,22 @@ from .strategies import DEFAULT_SPEC, StrategySpec
 #
 # Patching the module-level constants is the only reliable workaround.
 # TODO: Remove once graphrag-toolkit publishes a fix with active model defaults.
+#
+# Resolution order: GRAPHRAG_LLM_MODEL (explicit override) -> BEDROCK_MODEL_ID
+# (the deployment's config-resolved query model, #94 — region-appropriate by
+# construction) -> the US profile literal as a last resort. The literal used to
+# be the sole fallback, so every non-US deployment ran the toolkit LLM against a
+# `us.` inference profile that does not exist in its region: each agentic
+# retrieval strategy (chunk_based_semantic, topic_based, traversal, ...) failed
+# with ValidationException "The provided model identifier is invalid" and was
+# reported as "degraded: ModelError", leaving deep-reasoning without document
+# retrieval while the standard path worked (its vector search bypasses the
+# toolkit LLM). The same #236 class of defect as the ontology-engine grounding
+# reranker.
 # ---------------------------------------------------------------------------
-_ACTIVE_MODEL = os.environ.get("GRAPHRAG_LLM_MODEL", "us.anthropic.claude-sonnet-5")
+_ACTIVE_MODEL = (
+    os.environ.get("GRAPHRAG_LLM_MODEL") or os.environ.get("BEDROCK_MODEL_ID") or "us.anthropic.claude-sonnet-5"
+)
 _graphrag_cfg.DEFAULT_RESPONSE_MODEL = _ACTIVE_MODEL
 _graphrag_cfg.DEFAULT_EXTRACTION_MODEL = _ACTIVE_MODEL
 
