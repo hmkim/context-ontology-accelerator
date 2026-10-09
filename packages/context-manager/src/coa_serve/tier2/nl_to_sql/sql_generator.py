@@ -755,7 +755,7 @@ class SQLGenerator:
         # references (precise, single-source even when retrieval mixed sources);
         # fall back to the all-hits agreement when the SQL-based resolution is
         # inconclusive (e.g. unparseable SQL or unmapped tables).
-        resolved_source = _resolve_data_source_from_sql(sql, hits) or _resolve_data_source_from_hits(hits)
+        resolved_source = _resolve_data_source_from_sql(sql, hits, dialect) or _resolve_data_source_from_hits(hits)
 
         return NLtoSQLResult(
             sql=sql,
@@ -1173,7 +1173,7 @@ def _hit_table_source_map(hits: list[VectorHit]) -> dict[str, str]:
     return mapping
 
 
-def _resolve_data_source_from_sql(sql: str, hits: list[VectorHit]) -> str:
+def _resolve_data_source_from_sql(sql: str, hits: list[VectorHit], dialect: str = "trino") -> str:
     """Resolve data_source_id from the tables ACTUALLY referenced in ``sql``.
 
     Retrieval frequently surfaces class hits from several sources (e.g. a
@@ -1190,7 +1190,7 @@ def _resolve_data_source_from_sql(sql: str, hits: list[VectorHit]) -> str:
     if not table_source:
         return ""
     source_ids: set[str] = set()
-    for qualified in SQLFirewall.extract_tables(sql):
+    for qualified in SQLFirewall.extract_tables(sql, dialect or "trino"):
         # firewall returns catalog.schema.table / schema.table / table — the
         # bare table name is the last dotted segment; hits are keyed by it.
         bare = qualified.split(".")[-1].strip().lower()
