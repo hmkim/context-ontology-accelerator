@@ -1175,3 +1175,25 @@ class TestEngineDialectStatements:
         assert comp._extract_tables_any_dialect(self.TSQL) == ["person", "condition_occurrence"]
         assert comp._extract_tables_any_dialect("SELECT id FROM orders") == ["orders"]
         assert comp._extract_tables_any_dialect("SELECT ((") == []
+
+
+@pytest.mark.unit
+class TestScopeCheckUsesEngineDialect:
+    async def test_schema_qualified_tsql_passes_namespace_scope_check(self):
+        """After schema qualification a T-SQL statement carries dot-qualified names, so
+        the JDBC route runs the namespace-scope check; parsing that check with trino
+        refused valid T-SQL as 'Unable to verify SQL references'."""
+        athena = _make_executor("athena")
+        jdbc = _make_executor("jdbc")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena, source_db_executor=jdbc, sources_registry=_jdbc_registry("SQLSERVER")
+        )
+        sql = (
+            "SELECT TOP 5 (CAST(CONVERT(CHAR(8), CAST('2026-09-30' AS DATE), 112) AS INT) "
+            "- CAST(CONVERT(CHAR(8), p.birth_datetime, 112) AS INT)) / 10000 AS age "
+            'FROM "sales"."orders" p JOIN "crm"."customers" c ON c.id = p.id'
+        )
+        result = await comp.execute(sql, namespace="ns", data_source_id="mydb")
+        jdbc.execute.assert_awaited_once()
+        athena.execute.assert_not_awaited()
+        assert result.rows[0]["engine"] == "jdbc"
