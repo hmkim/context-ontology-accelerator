@@ -1259,6 +1259,7 @@ def sql_table_routing(
     sql: str,
     table_sources: dict[str, str],
     table_schemas: dict[str, str] | None = None,
+    dialect: str | None = None,
 ) -> dict[str, dict[str, str]]:
     """Build a ``datasourceRouting``-shaped map for the tables ``sql`` references.
 
@@ -1289,7 +1290,7 @@ def sql_table_routing(
     routing: dict[str, dict[str, str]] = {}
     if not table_sources:
         return routing
-    for qualified in SQLFirewall.extract_tables(sql):
+    for qualified in SQLFirewall.extract_tables(sql, dialect or "trino"):
         bare = qualified.split(".")[-1].strip().lower()
         ds_id = table_sources.get(bare)
         if not ds_id:
