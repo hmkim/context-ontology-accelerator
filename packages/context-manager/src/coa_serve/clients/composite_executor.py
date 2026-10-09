@@ -174,30 +174,33 @@ class CompositeQueryExecutor:
                 # — a genuine bug (AttributeError, etc.) must surface, not be silently
                 # rerouted to Athena. Mirrors base.inject_limit's SqlglotError handling.
                 #
-                # `sql` here is post-substitution (contains caller-supplied
-                # dimension values — potential PII). Log length only, not the
-                # statement; mirrors the orchestrator's SQL-log discipline. The
-                # sqlglot error message echoes a SQL snippet, so log its type only.
-                #
-                # Do NOT forward the untranspiled Trino SQL to the JDBC engine:
-                # Trino-only constructs run with different (silently wrong) semantics
-                # on MySQL/Postgres, and a Trino `LIMIT` is invalid T-SQL. Fall back
-                # to Athena, which executes Trino SQL natively — the same safe path
-                # taken when no JDBC executor is configured.
-                logger.warning(
-                    "jdbc_trino_transpile_failed_fallback_athena",
-                    target_dialect=target_dialect,
-                    sql_len=len(sql),
-                    error_type=type(exc).__name__,
-                )
-                logger.info("composite_dispatch", route="athena_federation", data_source_id=data_source_id or "")
-                return await self._athena.execute(
-                    sql,
-                    namespace=namespace,
-                    data_source_id=data_source_id,
-                    max_rows=max_rows,
-                    timeout_seconds=timeout_seconds,
-                )
+                # Not Trino, then. The NL->SQL generator is prompted for the SOURCE
+                # engine's dialect (resolve_target_dialect), so the statement may
+                # already be valid T-SQL / PostgreSQL / MySQL that the trino parser
+                # cannot read (TOP n, CONVERT(type, x, style), ::casts). When it parses
+                # under the target dialect it is executed VERBATIM — by construction it
+                # is not Trino SQL, so the "Trino constructs run with different
+                # semantics on the engine" hazard does not apply. Only a statement
+                # valid in NEITHER dialect falls back to Athena, which executes Trino
+                # SQL natively — the same safe path taken when no JDBC executor is
+                # configured. `sql` is post-substitution (potential PII): log length only,
+                # and the sqlglot error message echoes a SQL snippet, so log its type only.
+                transpiled_sql = self._accept_target_dialect_sql(sql, target_dialect)
+                if transpiled_sql is None:
+                    logger.warning(
+                        "jdbc_trino_transpile_failed_fallback_athena",
+                        target_dialect=target_dialect,
+                        sql_len=len(sql),
+                        error_type=type(exc).__name__,
+                    )
+                    logger.info("composite_dispatch", route="athena_federation", data_source_id=data_source_id or "")
+                    return await self._athena.execute(
+                        sql,
+                        namespace=namespace,
+                        data_source_id=data_source_id,
+                        max_rows=max_rows,
+                        timeout_seconds=timeout_seconds,
+                    )
             logger.info(
                 "composite_dispatch",
                 route="jdbc_direct",
@@ -293,7 +296,7 @@ class CompositeQueryExecutor:
         """
         if self._sources is None:
             return
-        if not any("." in ref for ref in self._firewall.extract_tables(sql)):
+        if not any("." in ref for ref in self._extract_tables_any_dialect(sql)):
             return
         scope = await self._sources.sql_namespace_scope(namespace)
         if scope is None:
@@ -321,6 +324,47 @@ class CompositeQueryExecutor:
                 federated_catalog_schemas=sorted(f"{c}.{d}" for c, d in scope.federated_catalog_schemas),
             )
             raise
+
+    # Engine dialects a direct-JDBC source can be generated in. Tried in order when
+    # the canonical trino parse yields nothing; the first dialect that parses wins
+    # (table NAMES are what routing needs, and those agree across dialects).
+    _ENGINE_DIALECTS: tuple[str, ...] = ("tsql", "postgres", "mysql", "redshift")
+
+    def _extract_tables_any_dialect(self, sql: str) -> list[str]:
+        """Table references of ``sql`` for routing, without assuming the Trino dialect.
+
+        ``extract_tables`` returns ``[]`` (never raises) when the statement does not
+        parse under the requested dialect. A statement generated in the engine's own
+        dialect therefore looked table-less under trino and was mis-routed; retry
+        with the direct-JDBC engine dialects before giving up.
+        """
+        tables = self._firewall.extract_tables(sql)
+        if tables:
+            return tables
+        for dialect in self._ENGINE_DIALECTS:
+            tables = self._firewall.extract_tables(sql, dialect)
+            if tables:
+                logger.info("composite_tables_parsed_with_engine_dialect", dialect=dialect, tables=len(tables))
+                return tables
+        return []
+
+    @staticmethod
+    def _accept_target_dialect_sql(sql: str, target_dialect: str) -> str | None:
+        """Return ``sql`` unchanged when it parses under ``target_dialect``, else None."""
+        try:
+            sqlglot.parse_one(sql, read=target_dialect)
+        except (sqlglot.errors.SqlglotError, ValueError) as exc:
+            # `sql` is post-substitution (potential PII) and the sqlglot message
+            # echoes a snippet of it: log the length and the error type only.
+            logger.warning(
+                "jdbc_sql_not_valid_in_target_dialect",
+                target_dialect=target_dialect,
+                sql_len=len(sql),
+                error_type=type(exc).__name__,
+            )
+            return None
+        logger.info("jdbc_sql_accepted_in_target_dialect", target_dialect=target_dialect)
+        return sql
 
     def _select_jdbc_candidate(self, sql: str, data_source_id: str) -> bool:
         """Return True if ``sql`` is a single-source candidate for the JDBC path.
@@ -551,7 +595,7 @@ class CompositeQueryExecutor:
         """
         catalogs: set[str] = set()
         has_bare_table = False
-        for qualified in self._firewall.extract_tables(sql):
+        for qualified in self._extract_tables_any_dialect(sql):
             parts = qualified.split(".")
             if len(parts) >= 3:
                 catalogs.add(parts[0])
