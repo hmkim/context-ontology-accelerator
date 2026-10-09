@@ -583,6 +583,17 @@ export class ServeStack extends SCLStack {
               this.node.tryGetContext("serve_nl2sql_graph_expand_max_tables"),
             ),
           }),
+          // Output-token budget for the Tier-2 NL→SQL generation call (code default
+          // 4096, clamped to 512..32768 in sql_generator). A reasoning model spends
+          // the SAME budget on its thinking blocks, so a multi-table question can end
+          // at stopReason=max_tokens with no SQL text at all and the arm reports
+          // generate_failed. Raise it without an image rebuild via
+          // `-c serve_nl2sql_max_tokens=16384`; left absent, the code default applies.
+          ...(this.node.tryGetContext("serve_nl2sql_max_tokens") !== undefined && {
+            SERVE_NL2SQL_MAX_TOKENS: String(
+              this.node.tryGetContext("serve_nl2sql_max_tokens"),
+            ),
+          }),
           // Deep-reasoning Tier-3 budgets. The 30s code default squeezes later tools
           // below their runtime (graphrag strategy calls take 10-40s); much above this
           // the AgentCore endpoint returns an empty envelope. MUST stay under
