@@ -408,7 +408,7 @@ class NLtoSQLStrategy:
         if not self._query_executor:
             # Firewall-check the SQL so an unsafe/denied first shot is still
             # surfaced, then skip (no executor configured — e.g. Tier-3 reuse).
-            self._firewall_check(nl_to_sql_result.sql, profile, namespace, trace)
+            self._firewall_check(nl_to_sql_result.sql, profile, namespace, trace, dialect=dialect)
             trace.record(StepId.T2_SQL_EXECUTE, "skipped", 0, detail="no query_executor configured")
             return None
 
@@ -431,7 +431,7 @@ class NLtoSQLStrategy:
             shot_start = time.perf_counter()
             # Firewall (unsafe → skip strategy; denied → 403). Re-run per shot
             # because each shot produces distinct SQL that must be authorized.
-            fw_result = self._firewall_check(sql, profile, namespace, trace)
+            fw_result = self._firewall_check(sql, profile, namespace, trace, dialect=dialect)
             if fw_result is None:
                 return None  # unsafe SQL — abandon the strategy
 
@@ -691,7 +691,9 @@ class NLtoSQLStrategy:
         routing = sql_table_routing(sql, nl_result.table_sources, table_schemas)
         return await prepare_execution_sql(sql, routing, self._sources, namespace=namespace)
 
-    def _firewall_check(self, sql: str, profile: dict, namespace: str, trace) -> FirewallResult | None:
+    def _firewall_check(
+        self, sql: str, profile: dict, namespace: str, trace, dialect: str = "trino"
+    ) -> FirewallResult | None:
         """Run the SQL firewall + Cedar gate for one candidate statement.
 
         Returns the FirewallResult on allow. Returns None (caller abandons the
@@ -700,7 +702,10 @@ class NLtoSQLStrategy:
         """
         fw_start = time.perf_counter()
         try:
-            fw_result = self._firewall.evaluate(sql, profile, namespace=namespace)
+            # Parse with the dialect the SQL was GENERATED in (the engine's own):
+            # under the trino default a valid T-SQL statement (TOP n,
+            # CONVERT(type, x, style)) fails to parse and is discarded as unsafe.
+            fw_result = self._firewall.evaluate(sql, profile, namespace=namespace, dialect=dialect)
         except UnsafeSQLError as e:
             fw_ms = int((time.perf_counter() - fw_start) * 1000)
             trace.record(
