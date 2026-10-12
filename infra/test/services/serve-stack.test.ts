@@ -883,7 +883,6 @@ describe("ServeStack - GRAPH_URI_TEMPLATE reader/writer alignment", () => {
   });
 });
 
-
 describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
   const envOf = (template: Template): Record<string, unknown> => {
     const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
@@ -900,9 +899,9 @@ describe("ServeStack - SERVE_VKG_TRANSLATION_TIMEOUT_S wiring", () => {
     // The load-bearing case: a numeric 0 in cdk.json context is falsy in JS, so a
     // truthiness check would drop it. serve-stack uses `!== undefined`, so it must
     // survive as "0" and be clamped downstream rather than silently ignored.
-    expect(envOf(createStack({ serve_vkg_translation_timeout_s: 0 }))).toMatchObject(
-      { SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" },
-    );
+    expect(
+      envOf(createStack({ serve_vkg_translation_timeout_s: 0 })),
+    ).toMatchObject({ SERVE_VKG_TRANSLATION_TIMEOUT_S: "0" });
   });
 
   it("passes a set value through verbatim", () => {
@@ -985,5 +984,61 @@ describe("context-manager Dockerfile CVE hygiene", () => {
 
   test("upgrades pip so its own advisories are picked up", () => {
     expect(dockerfile).toMatch(/pip install[^\n]*--upgrade pip/);
+  });
+});
+
+describe("ServeStack - LLM output-token budgets", () => {
+  it("sets neither budget variable unless its context key is passed", () => {
+    // Absent means the code defaults (4096) stay in force; the stack must not pin
+    // a value that would later shadow a change to the default in the image.
+    const runtimes = createStack().findResources(
+      "AWS::BedrockAgentCore::Runtime",
+    );
+    for (const runtime of Object.values(runtimes)) {
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "SERVE_NL2SQL_MAX_TOKENS",
+      );
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "TIER3_SYNTH_MAX_TOKENS",
+      );
+    }
+  });
+
+  it("passes serve_nl2sql_max_tokens through as SERVE_NL2SQL_MAX_TOKENS", () => {
+    createStack({ serve_nl2sql_max_tokens: 16384 }).hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      {
+        EnvironmentVariables: Match.objectLike({
+          SERVE_NL2SQL_MAX_TOKENS: "16384",
+        }),
+      },
+    );
+  });
+
+  it("passes serve_tier3_synth_max_tokens through as TIER3_SYNTH_MAX_TOKENS", () => {
+    createStack({ serve_tier3_synth_max_tokens: 16384 }).hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      {
+        EnvironmentVariables: Match.objectLike({
+          TIER3_SYNTH_MAX_TOKENS: "16384",
+        }),
+      },
+    );
+  });
+
+  it("sets each budget independently of the other", () => {
+    const template = createStack({ serve_tier3_synth_max_tokens: "8192" });
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        TIER3_SYNTH_MAX_TOKENS: "8192",
+      }),
+    });
+    for (const runtime of Object.values(
+      template.findResources("AWS::BedrockAgentCore::Runtime"),
+    )) {
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "SERVE_NL2SQL_MAX_TOKENS",
+      );
+    }
   });
 });
