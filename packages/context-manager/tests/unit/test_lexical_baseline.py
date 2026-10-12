@@ -1392,14 +1392,46 @@ class TestRetiredModelPatch:
         assert _graphrag_cfg.DEFAULT_RESPONSE_MODEL != self._RETIRED_MODEL
 
     def test_active_model_is_overridable_via_env(self):
-        """``_ACTIVE_MODEL`` is sourced from ``GRAPHRAG_LLM_MODEL`` (overridable),
-        falling back to the active default when the env var is unset."""
+        """``_ACTIVE_MODEL`` is sourced from ``GRAPHRAG_LLM_MODEL`` (overridable), then
+        the deployment's ``BEDROCK_MODEL_ID``, falling back to the active default when
+        neither env var is set."""
         import os
 
         from coa_serve.lexical.baseline_retriever import _ACTIVE_MODEL
 
-        expected = os.environ.get("GRAPHRAG_LLM_MODEL", "us.anthropic.claude-sonnet-5")
+        expected = (
+            os.environ.get("GRAPHRAG_LLM_MODEL") or os.environ.get("BEDROCK_MODEL_ID") or "us.anthropic.claude-sonnet-5"
+        )
         assert expected == _ACTIVE_MODEL
+
+    def test_deployment_model_id_is_used_when_no_explicit_override(self):
+        """Without ``GRAPHRAG_LLM_MODEL`` the toolkit LLM follows ``BEDROCK_MODEL_ID`` —
+        the region-resolved query model — so a non-US deployment does not call a
+        ``us.`` inference profile that does not exist in its region. An explicit
+        ``GRAPHRAG_LLM_MODEL`` still wins over it."""
+        import importlib
+        import os
+        from unittest.mock import patch as _patch
+
+        import coa_serve.lexical.baseline_retriever as br
+        import graphrag_toolkit.lexical_graph.config as _graphrag_cfg
+
+        regional = "global.anthropic.claude-sonnet-5"
+        explicit = "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
+        try:
+            env = {k: v for k, v in os.environ.items() if k != "GRAPHRAG_LLM_MODEL"}
+            env["BEDROCK_MODEL_ID"] = regional
+            with _patch.dict(os.environ, env, clear=True):
+                importlib.reload(br)
+                assert regional == br._ACTIVE_MODEL
+                assert regional == _graphrag_cfg.DEFAULT_RESPONSE_MODEL
+                assert regional == _graphrag_cfg.DEFAULT_EXTRACTION_MODEL
+            env["GRAPHRAG_LLM_MODEL"] = explicit
+            with _patch.dict(os.environ, env, clear=True):
+                importlib.reload(br)
+                assert explicit == br._ACTIVE_MODEL
+        finally:
+            importlib.reload(br)
 
     def test_env_override_changes_patched_constants_on_reimport(self):
         """Setting ``GRAPHRAG_LLM_MODEL`` and re-importing the module patches the
