@@ -611,6 +611,9 @@ class NLtoSQLStrategy:
                     # authored against a different source is dropped rather than
                     # fed into the correction, which would otherwise burn the shot.
                     governed_metric=_governed_metric_block(context.declined_metric, data_source_id),
+                    # Same dialect the first shot was generated under; without it the
+                    # correction is prompted with the Athena default (see correct()).
+                    dialect=dialect,
                 )
                 correct_ms = int((time.perf_counter() - correct_start) * 1000)
                 if not sql:
