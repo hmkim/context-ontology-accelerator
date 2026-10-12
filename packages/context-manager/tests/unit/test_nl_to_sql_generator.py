@@ -784,6 +784,31 @@ class TestSqlTableRoutingAmbiguity:
 
 
 @pytest.mark.unit
+class TestSqlTableRoutingSchemas:
+    """`sql_table_routing` carries the mapping-derived per-table schema when given one."""
+
+    def test_schema_attached_to_attributed_entry(self):
+        routing = sql_table_routing(
+            "SELECT 1 FROM condition_occurrence co JOIN pt_master p ON co.person_id = p.patient_id",
+            {"condition_occurrence": "src", "pt_master": "src"},
+            {"condition_occurrence": "cdm", "pt_master": "hosp"},
+        )
+        assert routing["condition_occurrence"] == {"datasourceId": "src", "sourceSchema": "cdm"}
+        assert routing["pt_master"] == {"datasourceId": "src", "sourceSchema": "hosp"}
+
+    def test_table_without_known_schema_keeps_datasource_only(self):
+        routing = sql_table_routing("SELECT 1 FROM orders", {"orders": "pg"}, {"customers": "sales"})
+        assert routing["orders"] == {"datasourceId": "pg"}
+
+    def test_ambiguous_marker_never_gets_a_schema(self):
+        routing = sql_table_routing("SELECT 1 FROM customers", {"customers": "__ambiguous__"}, {"customers": "x"})
+        assert routing["customers"] == {AMBIGUOUS_KEY: "customers"}
+
+    def test_none_schemas_is_the_old_shape(self):
+        assert sql_table_routing("SELECT 1 FROM orders", {"orders": "pg"}, None) == {"orders": {"datasourceId": "pg"}}
+
+
+@pytest.mark.unit
 class TestTableSourcesNeedPreparation:
     def test_single_unambiguous_source_skips(self):
         assert table_sources_need_preparation({"orders": "pg", "items": "pg"}) is False
