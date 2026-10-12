@@ -635,6 +635,8 @@ Leaving either setting unset leaves the runtime's default in charge; the stack o
 
 **NL→SQL output budget.** The generation call caps its output at 4,096 tokens by default (`SERVE_NL2SQL_MAX_TOKENS`, clamped to 512–32,768). Reasoning models spend that budget on their thinking blocks too, so a wide multi-table question can stop at `max_tokens` with no SQL text and the Tier-2 arm reports `generate_failed`. Raise it with `-c serve_nl2sql_max_tokens=16384`; it is a stack update, not an image rebuild.
 
+**Tier 3 synthesis output budget.** The final synthesis call that writes a Tier 3 answer caps its output at 4,096 tokens by default (`TIER3_SYNTH_MAX_TOKENS`, clamped to 4,096–64,000). The same thinking-block pathology applies, and the symptom is quieter: the answer arrives as a normal 200 cut off mid-sentence (the Serve runtime logs a `bedrock_output_truncated` warning with the budget and the characters returned). Long grounded answers — a patient summary citing several documents, a wide tabular breakdown — are the ones that hit it. Raise it with `-c serve_tier3_synth_max_tokens=16384`; also a stack update, not an image rebuild.
+
 `scripts/deploy.sh` maps the variables above to the CDK context parameters `serve_nl2sql_graph_expand` and `serve_nl2sql_graph_expand_max_tables`. On a direct `cdk deploy`, pass them as context instead — `--context serve_nl2sql_graph_expand=false` — or set them in the `context` block of `infra/cdk.json`.
 
 ### VKG Task Sizing

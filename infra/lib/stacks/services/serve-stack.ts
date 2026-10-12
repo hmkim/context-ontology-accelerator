@@ -589,9 +589,25 @@ export class ServeStack extends SCLStack {
           // at stopReason=max_tokens with no SQL text at all and the arm reports
           // generate_failed. Raise it without an image rebuild via
           // `-c serve_nl2sql_max_tokens=16384`; left absent, the code default applies.
-          ...(this.node.tryGetContext("serve_nl2sql_max_tokens") !== undefined && {
+          ...(this.node.tryGetContext("serve_nl2sql_max_tokens") !==
+            undefined && {
             SERVE_NL2SQL_MAX_TOKENS: String(
               this.node.tryGetContext("serve_nl2sql_max_tokens"),
+            ),
+          }),
+          // Output-token budget for the Tier-3 synthesis call (code default 4096,
+          // clamped to 4096..64000 in tier3/synthesizer). Same pathology as above:
+          // a reasoning query model spends the budget on thinking first, so a long
+          // grounded answer (a multi-source clinical summary, a wide tabular
+          // breakdown) stops at stopReason=max_tokens mid-sentence. The client logs
+          // bedrock_output_truncated but the response is still a 200 with the partial
+          // text, so nothing downstream fails loudly. Raise it without an image
+          // rebuild via `-c serve_tier3_synth_max_tokens=16384`; left absent, the
+          // code default applies.
+          ...(this.node.tryGetContext("serve_tier3_synth_max_tokens") !==
+            undefined && {
+            TIER3_SYNTH_MAX_TOKENS: String(
+              this.node.tryGetContext("serve_tier3_synth_max_tokens"),
             ),
           }),
           // Deep-reasoning Tier-3 budgets. The 30s code default squeezes later tools
