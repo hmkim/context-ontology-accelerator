@@ -1079,6 +1079,24 @@ describe("ServeStack - deep-reasoning planner model knobs", () => {
     });
   });
 
+  it("exposes the reasoning-step cap only when deep_reasoning_max_steps is passed", () => {
+    for (const runtime of Object.values(
+      createStack().findResources("AWS::BedrockAgentCore::Runtime"),
+    )) {
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "DEEP_REASONING_MAX_STEPS",
+      );
+    }
+    createStack({ deep_reasoning_max_steps: 16 }).hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      {
+        EnvironmentVariables: Match.objectLike({
+          DEEP_REASONING_MAX_STEPS: "16",
+        }),
+      },
+    );
+  });
+
   it("sets each planner knob independently of the others", () => {
     const template = createStack({
       deep_reasoning_planner_model_id: "global.anthropic.claude-haiku-5-5",

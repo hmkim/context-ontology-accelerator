@@ -292,6 +292,20 @@ class ReasoningController:
             if clock.expired():
                 return StopReason.time_budget_expired
 
+            # Stop as soon as the budget minus the synthesis reserve can no longer
+            # give a tool a useful window: every further step would be a planner
+            # call followed by an epsilon-timeout tool invocation (tail waste), and
+            # the slice is better spent on synthesis. Reported as the time budget
+            # stop reason — the budget IS what ran out.
+            if clock.tool_time_exhausted():
+                trace.record(
+                    "next_step_select",
+                    "success",
+                    clock.elapsed_ms(),
+                    detail="tool_time_exhausted: remaining budget below one useful tool window",
+                )
+                return StopReason.time_budget_expired
+
             # Aggregate max-step cap (Req 4.5, 6.4).
             if not clock.try_consume_step():
                 return StopReason.max_steps_reached

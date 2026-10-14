@@ -390,3 +390,59 @@ class TestPlannerMaxTokensForwarding:
         planner = BedrockStepPlanner(llm)
         await planner.assess(sub_question=_sq(), context=AccumulatedContext())
         assert llm.calls[0]["max_tokens"] == 1024
+
+
+class SequenceLLM(FakeLLM):
+    """FakeLLM returning a different scripted text on each converse call."""
+
+    def __init__(self, texts):
+        super().__init__(text=texts[0])
+        self._texts = list(texts)
+
+    async def converse(self, **kwargs):
+        self._text = self._texts.pop(0) if self._texts else self._text
+        return await super().converse(**kwargs)
+
+
+@pytest.mark.unit
+class TestProposeUnparseableRetry:
+    @pytest.mark.asyncio
+    async def test_retries_once_and_uses_the_second_reply(self):
+        """One malformed reply (truncated JSON, prose) must not end the sub-question
+        with zero tool calls: re-ask once, parse the second reply."""
+        good = '{"candidates": [{"tool_name": "strategy:entity_based", "inputs": {"query": "q"}}]}'
+        llm = SequenceLLM(['{"candidates": [{"tool_name": "strat', good])
+        planner = BedrockStepPlanner(llm)
+        decisions = await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert len(llm.calls) == 2
+        assert [d.tool_name for d in decisions] == ["strategy:entity_based"]
+        # identical re-ask: same prompt/system/temperature
+        assert llm.calls[0]["prompt"] == llm.calls[1]["prompt"]
+        assert llm.calls[0]["system"] == llm.calls[1]["system"]
+
+    @pytest.mark.asyncio
+    async def test_two_unparseable_replies_degrade_to_empty(self):
+        llm = SequenceLLM(["not json", "still not json"])
+        planner = BedrockStepPlanner(llm)
+        decisions = await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert decisions == []
+        assert len(llm.calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_parseable_first_reply_is_not_retried(self):
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert len(llm.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_routes_recorded_values_to_the_structured_tool(self):
+        """Recorded per-entity values (lab results, counts, dates) go to nl_to_sql
+        early, one fact per call — document/graph retrieval cannot return them."""
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        system = llm.calls[0]["system"]
+        assert "STRUCTURED FACTS COME FROM THE STRUCTURED TOOL" in system
+        assert "nl_to_sql" in system
+        assert "ONE fact per call" in system
