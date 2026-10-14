@@ -16,8 +16,10 @@ from __future__ import annotations
 import pytest
 from coa_ontology.induce_catalog import (
     _compute_curation_fingerprint,
+    _compute_grounding_fingerprint,
     _compute_structural_fingerprint,
     _is_duplicate_of,
+    _normalize_grounding_pool,
 )
 from coa_ontology.inducer.services.data_catalog import (
     CatalogColumn,
@@ -157,3 +159,56 @@ class TestDuplicateDecision:
     def test_legacy_proposal_without_curation_fingerprint_is_not_duplicate(self):
         """Nothing proves a pre-upgrade accepted proposal's text matches the catalog now."""
         assert _is_duplicate_of({"structural_fingerprint": "s1"}, "s1", "c1") is False
+
+
+class TestGroundingFingerprint:
+    """The grounding pool + mode is an input of the run and is hashed separately."""
+
+    def test_keys_and_uris_normalize_to_the_same_pool(self):
+        """A curated catalog key and its URI spell the same selection; order and duplicates are irrelevant."""
+        assert _normalize_grounding_pool(["schema-org"]) == ["https://schema.org/"]
+        assert _normalize_grounding_pool(["https://schema.org/", "schema-org", "http://hl7.org/fhir/"]) == [
+            "http://hl7.org/fhir/",
+            "https://schema.org/",
+        ]
+        assert _normalize_grounding_pool(None) == []
+        assert _normalize_grounding_pool(["", None]) == []  # type: ignore[list-item]
+
+    def test_same_pool_spelled_differently_hashes_identically(self):
+        a = _compute_grounding_fingerprint(["schema-org", "http://hl7.org/fhir/"], "ENHANCED")
+        b = _compute_grounding_fingerprint(["http://hl7.org/fhir/", "https://schema.org/"], "enhanced")
+        assert a == b
+
+    def test_adding_a_reference_ontology_changes_the_fingerprint(self):
+        """A steward uploads FHIR and re-induces: a new proposal must be built."""
+        before = _compute_grounding_fingerprint(["https://schema.org/"], "ENHANCED")
+        after = _compute_grounding_fingerprint(["https://schema.org/", "http://hl7.org/fhir/"], "ENHANCED")
+        assert before != after
+
+    def test_mode_changes_the_fingerprint(self):
+        pool = ["https://schema.org/"]
+        assert _compute_grounding_fingerprint(pool, "ENHANCED") != _compute_grounding_fingerprint(pool, "STANDARD")
+
+    def test_mode_defaults_to_enhanced_when_omitted(self):
+        assert _compute_grounding_fingerprint([], None) == _compute_grounding_fingerprint([], "ENHANCED")
+
+
+class TestDuplicateDecisionWithGrounding:
+    _META = {"structural_fingerprint": "s1", "curation_fingerprint": "c1", "grounding_fingerprint": "g1"}
+
+    def test_same_structure_curation_and_grounding_is_duplicate(self):
+        assert _is_duplicate_of(self._META, "s1", "c1", "g1") is True
+
+    def test_different_grounding_pool_is_not_duplicate(self):
+        """Same tables, same descriptions, but a new reference ontology in the pool → re-induce."""
+        assert _is_duplicate_of(self._META, "s1", "c1", "g2") is False
+
+    def test_legacy_proposal_without_grounding_fingerprint_is_not_duplicate(self):
+        """Nothing records what pool a pre-upgrade proposal was grounded against: let one run through."""
+        meta = {"structural_fingerprint": "s1", "curation_fingerprint": "c1"}
+        assert _is_duplicate_of(meta, "s1", "c1", "g1") is False
+
+    def test_omitting_the_grounding_argument_keeps_the_old_contract(self):
+        """Callers that pass no grounding fingerprint compare structure + curation only."""
+        assert _is_duplicate_of(self._META, "s1", "c1") is True
+        assert _is_duplicate_of(self._META, "s1", "c2") is False
