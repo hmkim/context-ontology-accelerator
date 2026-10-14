@@ -370,3 +370,23 @@ class TestLazyImportInvariant:
             f"importing planner leaked graphrag_toolkit or failed.\nstdout={result.stdout}\nstderr={result.stderr}"
         )
         assert "OK" in result.stdout
+
+
+@pytest.mark.unit
+class TestPlannerMaxTokensForwarding:
+    """The configured planner output cap reaches both planner Converse calls (finding 16)."""
+
+    @pytest.mark.asyncio
+    async def test_propose_and_assess_use_configured_max_tokens(self):
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm, max_tokens=2048)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        await planner.assess(sub_question=_sq(), context=AccumulatedContext())
+        assert [c["max_tokens"] for c in llm.calls] == [2048, 2048]
+
+    @pytest.mark.asyncio
+    async def test_default_max_tokens_is_1024(self):
+        llm = FakeLLM(text="{}")
+        planner = BedrockStepPlanner(llm)
+        await planner.assess(sub_question=_sq(), context=AccumulatedContext())
+        assert llm.calls[0]["max_tokens"] == 1024
