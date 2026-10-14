@@ -189,7 +189,51 @@ def _compute_curation_fingerprint(tables) -> str:
     return hashlib.sha256(str(parts).encode()).hexdigest()[:16]
 
 
-def _is_duplicate_of(existing_meta: dict, fingerprint: str, curation_fingerprint: str) -> bool:
+def _normalize_grounding_pool(grounding_keys: list[str] | None) -> list[str]:
+    """Canonicalize the caller's grounding selection to a sorted, de-duplicated URI list.
+
+    The induction modal sends curated catalog KEYS (``"schema-org"``) and/or
+    already-resolved URIs (``"https://schema.org/"``); both spell the same
+    pool, so keys are mapped to their URI before hashing. Unknown keys are kept
+    verbatim (``resolve_grounding_ontology_ids`` drops them later with a
+    warning). No network or store access: this runs before grounding
+    resolution, which may load foundationals synchronously.
+    """
+    from coa_ontology.catalog.routers.foundational import _BY_KEY
+
+    pool: set[str] = set()
+    for key in grounding_keys or []:
+        if not key:
+            continue
+        entry = _BY_KEY.get(key)
+        pool.add(entry.uri if entry is not None else key.strip())
+    return sorted(pool)
+
+
+def _compute_grounding_fingerprint(grounding_keys: list[str] | None, grounding_mode: str | None) -> str:
+    """Deterministic hash of the grounding pool and mode the run was asked for.
+
+    Grounding is an INPUT of the induction — the matches, ``skos:exactMatch``
+    links and the ``grounding_ontologies_used`` report all depend on which
+    reference ontologies were in the pool. A steward who uploads a new reference
+    ontology (FHIR, SNOMED CT, ...) and re-induces changes nothing structural and
+    nothing curated, so without this the run is short-circuited as a duplicate of
+    the accepted proposal and the new grounding never happens. Hashed from the
+    normalized pool (see ``_normalize_grounding_pool``) plus the mode, so the same
+    selection spelled as keys or URIs, in any order, hashes identically.
+    """
+    import hashlib
+
+    parts = (tuple(_normalize_grounding_pool(grounding_keys)), (grounding_mode or "ENHANCED").upper())
+    return hashlib.sha256(str(parts).encode()).hexdigest()[:16]
+
+
+def _is_duplicate_of(
+    existing_meta: dict,
+    fingerprint: str,
+    curation_fingerprint: str,
+    grounding_fingerprint: str | None = None,
+) -> bool:
     """Decide whether an accepted proposal makes the current run redundant.
 
     Structure must match. Curation must match too — except for an accepted
@@ -198,13 +242,25 @@ def _is_duplicate_of(existing_meta: dict, fingerprint: str, curation_fingerprint
     catalog's current text, so it is NOT treated as a duplicate. That lets one
     re-induction through for such namespaces (the steward may reject the proposal
     if nothing changed); the new proposal then carries both fingerprints.
+
+    The grounding pool + mode must match as well, by the same rule: a proposal
+    without a stored ``grounding_fingerprint`` is not a duplicate (one
+    re-induction gets through and stamps it). ``grounding_fingerprint=None``
+    skips the grounding comparison (legacy callers).
     """
     if existing_meta.get("structural_fingerprint") != fingerprint:
         return False
     stored = existing_meta.get("curation_fingerprint")
     if stored is None:
         return False
-    return stored == curation_fingerprint
+    if stored != curation_fingerprint:
+        return False
+    if grounding_fingerprint is None:
+        return True
+    stored_grounding = existing_meta.get("grounding_fingerprint")
+    if stored_grounding is None:
+        return False
+    return stored_grounding == grounding_fingerprint
 
 
 def _floats_to_decimal(obj):
@@ -877,15 +933,18 @@ def _run_induction(
 
             # Duplicate detection: an accepted proposal with identical structure
             # (table names + column names/types + FKs) AND identical curation
-            # (table/column descriptions + synonyms) makes this run redundant. The
-            # curation half is what lets a steward's description edits re-induce
-            # into a new proposal instead of being swallowed as a duplicate.
+            # (table/column descriptions + synonyms) AND the same grounding pool +
+            # mode makes this run redundant. The curation half is what lets a
+            # steward's description edits re-induce into a new proposal instead of
+            # being swallowed as a duplicate; the grounding third does the same for
+            # a newly uploaded reference ontology (FHIR, SNOMED CT, ...).
             fingerprint = _compute_structural_fingerprint(all_tables)
             curation_fingerprint = _compute_curation_fingerprint(all_tables)
+            grounding_fingerprint = _compute_grounding_fingerprint(body.grounding_ontology_ids, body.grounding_mode)
             existing_accepted = dynamo_store.list_proposals(namespace=ns, status="accepted")
             for existing in existing_accepted:
                 e_meta = existing.get("metadata") or {}
-                if _is_duplicate_of(e_meta, fingerprint, curation_fingerprint):
+                if _is_duplicate_of(e_meta, fingerprint, curation_fingerprint, grounding_fingerprint):
                     job.status = schemas_mod.JobStatus.COMPLETED
                     # Surface duplicate_of on the in-memory job too, not just the DDB
                     # row: the /jobs/{id} poll returns this object while the worker
@@ -1131,8 +1190,13 @@ def _run_induction(
                     # consumer AND the S3-offload plumbing — never inline in this dict, the
                     # per-candidate lists blow the 400 KB DynamoDB item limit on wide schemas.
                     "grounding_ontologies_used": grounding_report_uris,
+                    # The pool/mode the run was ASKED for (not just the URIs that
+                    # produced matches): the duplicate check compares against it.
+                    "grounding_pool_requested": _normalize_grounding_pool(body.grounding_ontology_ids),
+                    "grounding_mode": (body.grounding_mode or "ENHANCED").upper(),
                     "structural_fingerprint": fingerprint,
                     "curation_fingerprint": curation_fingerprint,
+                    "grounding_fingerprint": grounding_fingerprint,
                     "has_constraint_config": True,
                     # Diagnostic snapshot of the immutable namespace language this
                     # run used; the namespace remains the authority.
