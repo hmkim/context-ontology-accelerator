@@ -143,6 +143,13 @@ _PROPOSE_SYSTEM = (
     "- switch modality: if semantic/chunk retrieval found nothing useful, anchor "
     "the relevant entity (entity-based retrieval or a keyword graph traversal) and "
     "then follow its ontology relationships with a graph traversal, or vice-versa.\n\n"
+    "STRUCTURED FACTS COME FROM THE STRUCTURED TOOL. When the sub-question needs a "
+    "specific recorded value for a named patient/entity (a latest lab result, a "
+    "measurement, a count, a prescription period, a date) and a structured query "
+    "tool (name starting with 'nl_to_sql') is in the catalog, select it EARLY — "
+    "document/graph retrieval returns narrative text, not the recorded values. Ask it "
+    "for ONE fact per call (e.g. 'latest HbA1c value and date for patient 710'), not "
+    "a combined report of several facts, so the row limit cannot truncate the answer.\n\n"
     f"{TOOL_PREFERENCE_INSTRUCTION}\n\n"
     "Each tool spec lists its name, a description, and an input_schema declaring "
     "the accepted input fields and their types. Populate inputs that conform to "
@@ -273,24 +280,47 @@ class BedrockStepPlanner:
         system = _PROPOSE_SYSTEM
         if any((spec.get("name") if isinstance(spec, dict) else "") == "chunk_window" for spec in tool_specs):
             system += _CHUNK_WINDOW_INSTRUCTION
-        try:
-            result = await self._planner.converse(
-                prompt=prompt,
-                system=system,
-                guardrail_id=self._effective_guardrail_id(),
-                guard_content=f"Question: {question}",
-                temperature=0.0,
-                max_tokens=self._max_tokens,
-            )
-        except Exception as exc:  # noqa: BLE001 - planner must never raise (Req 4.7)
-            logger.warning("planner_propose_error", error=str(exc), error_type=type(exc).__name__)
-            return []
 
-        if getattr(result, "guardrail_blocked", False):
-            logger.warning("planner_propose_guardrail_blocked")
-            return []
+        # An unparseable proposal is retried ONCE. The controller treats an empty
+        # candidate list as "no tool selectable" and ends the sub-question, so a
+        # single malformed JSON (a truncated or prose-wrapped reply — observed on
+        # ~3% of planner calls) used to cost the whole sub-question its retrieval,
+        # leaving the synthesizer with zero tool results. The retry is a plain
+        # re-ask at temperature 0 with the same prompt; a second failure still
+        # degrades to [] exactly as before (Req 4.7).
+        for attempt in range(2):
+            try:
+                result = await self._planner.converse(
+                    prompt=prompt,
+                    system=system,
+                    guardrail_id=self._effective_guardrail_id(),
+                    guard_content=f"Question: {question}",
+                    temperature=0.0,
+                    max_tokens=self._max_tokens,
+                )
+            except Exception as exc:  # noqa: BLE001 - planner must never raise (Req 4.7)
+                logger.warning("planner_propose_error", error=str(exc), error_type=type(exc).__name__)
+                return []
 
-        return self._parse_candidates(result.text)
+            if getattr(result, "guardrail_blocked", False):
+                logger.warning("planner_propose_guardrail_blocked")
+                return []
+
+            text = result.text or ""
+            if self._extract_json_object(text) is None:
+                # Keep the head of the raw reply in the log so the failure mode
+                # (truncation vs prose vs empty) is diagnosable after the fact.
+                logger.warning(
+                    "planner_propose_unparseable",
+                    attempt=attempt + 1,
+                    text_chars=len(text),
+                    text_head=text[:300],
+                )
+                if attempt == 0:
+                    continue
+                return []
+            return self._parse_candidates(text)
+        return []
 
     # ── sufficiency + grounded best-guess (Req 6.1-6.2; idea 2) ─────────
 

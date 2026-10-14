@@ -640,6 +640,16 @@ export class ServeStack extends SCLStack {
               this.node.tryGetContext("deep_reasoning_planner_max_tokens"),
             ),
           }),
+          // Aggregate reasoning-step cap (code default 10, clamped 1..50 in
+          // config.py). With a fast planner the 110 s budget fits well over ten
+          // tool calls, so the step cap — not the clock — ended most sessions.
+          // `-c deep_reasoning_max_steps=16`; left absent, the code default holds.
+          ...(this.node.tryGetContext("deep_reasoning_max_steps") !==
+            undefined && {
+            DEEP_REASONING_MAX_STEPS: String(
+              this.node.tryGetContext("deep_reasoning_max_steps"),
+            ),
+          }),
           // Deep-reasoning Tier-3 budgets. The 30s code default squeezes later tools
           // below their runtime (graphrag strategy calls take 10-40s); much above this
           // the AgentCore endpoint returns an empty envelope. MUST stay under
