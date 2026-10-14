@@ -1852,3 +1852,60 @@ class TestConverseTopPAndTemperatureObservability:
             assert "topP" not in cfg
         finally:
             bedrock_mod._MODELS_REJECTING_TOP_P.discard("learned-topp-model")
+
+
+@pytest.mark.unit
+class TestBedrockLLMClientAdditionalModelRequestFields:
+    """Client-level additionalModelRequestFields (planner thinking off, finding 16)."""
+
+    def _mock(self):
+        m = MagicMock()
+        m.converse.return_value = {"output": {"message": {"content": [{"text": "ok"}]}}}
+        return m
+
+    async def test_omitted_by_default(self):
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        mock_client = self._mock()
+        client = BedrockLLMClient(model_id="test-model", region="us-east-1")
+        client._client = mock_client
+        await client.converse("q")
+
+        assert "additionalModelRequestFields" not in mock_client.converse.call_args[1]
+
+    async def test_sent_verbatim_on_every_call(self):
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        mock_client = self._mock()
+        client = BedrockLLMClient(
+            model_id="test-model",
+            region="us-east-1",
+            additional_model_request_fields={"thinking": {"type": "disabled"}},
+        )
+        client._client = mock_client
+        await client.converse("q1")
+        await client.converse("q2", system="s", guardrail_id="gr-1")
+
+        for call in mock_client.converse.call_args_list:
+            assert call[1]["additionalModelRequestFields"] == {"thinking": {"type": "disabled"}}
+        # The other kwargs are untouched by the new field.
+        assert mock_client.converse.call_args_list[1][1]["guardrailConfig"]["guardrailIdentifier"] == "gr-1"
+
+    async def test_kwargs_copy_does_not_leak_between_calls(self):
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        client = BedrockLLMClient(
+            model_id="test-model",
+            region="us-east-1",
+            additional_model_request_fields={"thinking": {"type": "disabled"}},
+        )
+        kwargs = client._build_converse_kwargs("q")
+        kwargs["additionalModelRequestFields"]["thinking"] = {"type": "enabled"}
+
+        assert client._build_converse_kwargs("q")["additionalModelRequestFields"] == {"thinking": {"type": "disabled"}}
+
+    async def test_empty_mapping_sends_nothing(self):
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        client = BedrockLLMClient(model_id="test-model", region="us-east-1", additional_model_request_fields={})
+        assert "additionalModelRequestFields" not in client._build_converse_kwargs("q")

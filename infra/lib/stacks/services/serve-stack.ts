@@ -610,6 +610,36 @@ export class ServeStack extends SCLStack {
               this.node.tryGetContext("serve_tier3_synth_max_tokens"),
             ),
           }),
+          // Deep-reasoning PLANNER model. The planner (next-step selection,
+          // sufficiency assessment, decomposition) returns a few hundred tokens of
+          // JSON per call, yet by default it runs on the reasoning query model with
+          // adaptive thinking ON (Claude 5-class default even when `thinking` is
+          // omitted): 13-23 s per planner call and thinking eating most of the
+          // 1,024-token output cap, so a 110 s budget ran ~86% planner and the SQL
+          // tool got 0 ms. Point the planner at a small model and disable thinking
+          // without an image rebuild: `-c deep_reasoning_planner_model_id=
+          // global.anthropic.claude-haiku-5-5 -c deep_reasoning_planner_thinking=
+          // disabled`. Left absent, the planner reuses the query model as before.
+          ...(this.node.tryGetContext("deep_reasoning_planner_model_id") !==
+            undefined && {
+            DEEP_REASONING_PLANNER_MODEL_ID: String(
+              this.node.tryGetContext("deep_reasoning_planner_model_id"),
+            ),
+          }),
+          ...(this.node.tryGetContext("deep_reasoning_planner_thinking") !==
+            undefined && {
+            DEEP_REASONING_PLANNER_THINKING: String(
+              this.node.tryGetContext("deep_reasoning_planner_thinking"),
+            ),
+          }),
+          // Output-token cap for planner/assess calls (code default 1024, clamped
+          // 1024..8192 in config.py). Korean JSON answers are token-dense.
+          ...(this.node.tryGetContext("deep_reasoning_planner_max_tokens") !==
+            undefined && {
+            DEEP_REASONING_PLANNER_MAX_TOKENS: String(
+              this.node.tryGetContext("deep_reasoning_planner_max_tokens"),
+            ),
+          }),
           // Deep-reasoning Tier-3 budgets. The 30s code default squeezes later tools
           // below their runtime (graphrag strategy calls take 10-40s); much above this
           // the AgentCore endpoint returns an empty envelope. MUST stay under
