@@ -498,8 +498,14 @@ class TestVKGTranslatorCrossSourceQualification:
         assert result.executed_sql == executor.execute.call_args.args[0]
         assert result.executed_sql != self._SQL, "executed_sql still holds the un-qualified translate output"
 
-    async def test_single_source_sql_reaches_executor_verbatim(self):
-        """No regression on the path that already works."""
+    async def test_single_source_bare_tables_get_their_routing_schema(self):
+        """Single-source SQL stays on its own source, but bare tables are schema-qualified.
+
+        Ontop renders the mapping's bare ``rr:tableName``; on an engine with no
+        session default schema (SQL Server) that only resolves when the routing's
+        ``sourceSchema`` is restored. No catalog is added — the query never spans
+        sources — and the statement is otherwise unchanged.
+        """
         routing = {
             "claims": {"datasourceId": "ds-pg", "sourceSchema": "public"},
             "policies": {"datasourceId": "ds-pg", "sourceSchema": "public"},
@@ -513,7 +519,11 @@ class TestVKGTranslatorCrossSourceQualification:
         )
         await translator.resolve("SELECT ?s WHERE { ?s ?p ?o }", namespace="demo")
 
-        assert executor.execute.call_args.args[0] == self._SQL
+        executed = executor.execute.call_args.args[0]
+        assert '"public".claims' in executed
+        assert '"public".policies' in executed
+        assert "pg_cat" not in executed
+        assert "ON a.id = b.claim_id" in executed
         assert executor.execute.call_args.kwargs["data_source_id"] == "ds-pg"
 
     async def test_single_source_synthetic_schema_is_restored_before_execute(self):
