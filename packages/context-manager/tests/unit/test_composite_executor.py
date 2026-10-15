@@ -683,7 +683,11 @@ class TestJdbcRouteNamespaceScopeAuthorization:
         comp = CompositeQueryExecutor(
             athena_executor=athena, source_db_executor=jdbc, sources_registry=_jdbc_registry()
         )
-        bad_sql = "SELECT @@INVALID_TRINO FROM mydb.public.t"
+        # Invalid in EVERY dialect: a statement that merely is not Trino but parses
+        # under the target engine dialect is now executed verbatim on JDBC (see
+        # TestEngineDialectStatements), so the Athena fallback is reserved for SQL
+        # that is usable nowhere else.
+        bad_sql = "SELECT id FROM mydb.public.t WHERE (("
         patch_target = "coa_serve.clients.composite_executor.sqlglot.transpile"
         # transpile raises SqlglotError on parse/unsupported/optimize failures — the
         # executor catches THAT specifically (a generic bug must propagate, not reroute).
@@ -1091,3 +1095,79 @@ class TestCatalogAnalysis:
     def test_bare_mixed_with_qualified(self):
         catalogs, bare = self._comp()._catalog_analysis('SELECT a.id FROM "cat"."s"."t" a JOIN u b ON a.id = b.id')
         assert catalogs == {"cat"} and bare is True
+
+
+@pytest.mark.unit
+class TestEngineDialectStatements:
+    """The NL->SQL generator is prompted for the SOURCE engine's dialect, so the
+    composite executor must not assume every statement is Trino: a valid T-SQL
+    statement (TOP n, CONVERT(type, x, style)) failed the trino parse/transpile and
+    was bounced to Athena, whose firewall then rejected the same text as unsafe."""
+
+    TSQL = (
+        "SELECT TOP 10 (CAST(CONVERT(CHAR(8), CAST('2026-09-30' AS DATE), 112) AS INT) "
+        "- CAST(CONVERT(CHAR(8), p.birth_datetime, 112) AS INT)) / 10000 AS age "
+        "FROM person p JOIN condition_occurrence co ON co.person_id = p.person_id"
+    )
+
+    async def test_tsql_only_statement_runs_on_jdbc_verbatim(self):
+        athena = _make_executor("athena")
+        jdbc = _make_executor("jdbc")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena, source_db_executor=jdbc, sources_registry=_jdbc_registry("SQLSERVER")
+        )
+        result = await comp.execute(self.TSQL, namespace="ns", data_source_id="mydb")
+        jdbc.execute.assert_awaited_once()
+        athena.execute.assert_not_awaited()
+        assert result.rows[0]["engine"] == "jdbc"
+        # Executed as written: the trino transpile could not have produced this text.
+        assert jdbc.execute.call_args.args[0] == self.TSQL
+
+    async def test_statement_valid_in_neither_dialect_still_falls_back_to_athena(self):
+        athena = _make_executor("athena")
+        jdbc = _make_executor("jdbc")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena, source_db_executor=jdbc, sources_registry=_jdbc_registry("SQLSERVER")
+        )
+        await comp.execute("SELECT id FROM orders WHERE ((", namespace="ns", data_source_id="mydb")
+        athena.execute.assert_awaited_once()
+        jdbc.execute.assert_not_awaited()
+
+    async def test_trino_statement_is_still_transpiled_to_target(self):
+        """The happy path is unchanged: Trino SQL is transpiled (LIMIT -> TOP for T-SQL)."""
+        athena = _make_executor("athena")
+        jdbc = _make_executor("jdbc")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena, source_db_executor=jdbc, sources_registry=_jdbc_registry("SQLSERVER")
+        )
+        await comp.execute("SELECT id FROM orders LIMIT 5", namespace="ns", data_source_id="mydb")
+        jdbc.execute.assert_awaited_once()
+        assert "TOP 5" in jdbc.execute.call_args.args[0]
+
+    def test_extract_tables_any_dialect_reads_tsql(self):
+        comp = CompositeQueryExecutor(athena_executor=_make_executor("athena"), source_db_executor=None)
+        assert comp._extract_tables_any_dialect(self.TSQL) == ["person", "condition_occurrence"]
+        assert comp._extract_tables_any_dialect("SELECT id FROM orders") == ["orders"]
+        assert comp._extract_tables_any_dialect("SELECT ((") == []
+
+
+@pytest.mark.unit
+class TestScopeCheckUsesEngineDialect:
+    async def test_schema_qualified_tsql_passes_namespace_scope_check(self):
+        """After schema qualification a T-SQL statement carries dot-qualified names, so
+        the JDBC route runs the namespace-scope check; parsing that check with trino
+        refused valid T-SQL as 'Unable to verify SQL references'."""
+        athena = _make_executor("athena")
+        jdbc = _make_executor("jdbc")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena, source_db_executor=jdbc, sources_registry=_jdbc_registry("SQLSERVER")
+        )
+        sql = (
+            "SELECT TOP 5 (CAST(CONVERT(CHAR(8), CAST('2026-09-30' AS DATE), 112) AS INT) "
+            "- CAST(CONVERT(CHAR(8), p.birth_datetime, 112) AS INT)) / 10000 AS age "
+            'FROM "sales"."orders" p JOIN "crm"."customers" c ON c.id = p.id'
+        )
+        result = await comp.execute(sql, namespace="ns", data_source_id="mydb")
+        jdbc.execute.assert_awaited_once()
+        athena.execute.assert_not_awaited()
+        assert result.rows[0]["engine"] == "jdbc"
