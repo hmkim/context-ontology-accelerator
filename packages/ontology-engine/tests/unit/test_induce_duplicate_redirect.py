@@ -32,6 +32,7 @@ def test_duplicate_induction_sets_duplicate_of_on_inmemory_job() -> None:
     from coa_ontology.induce_catalog import (
         WorkbenchInductionRequest,
         _compute_curation_fingerprint,
+        _compute_grounding_fingerprint,
         _compute_structural_fingerprint,
         _jobs,
         _run_induction,
@@ -43,22 +44,23 @@ def test_duplicate_induction_sets_duplicate_of_on_inmemory_job() -> None:
 
     tables = [_tbl("customers", [CatalogColumn(name="id", dataType="INTEGER")])]
 
-    # A duplicate needs both the structural and the curation fingerprint to match
-    # (see _is_duplicate_of); a row with only the structural one is not one.
+    body = WorkbenchInductionRequest(
+        datasource_ids=["ds-1"],
+        ontology_uri_prefix="http://test.org/ontology/induced#",
+        grounding_ontologies=[],
+    )
+
+    # A duplicate needs the structural, curation AND grounding fingerprints to
+    # match (see _is_duplicate_of); a row missing any of them is not one.
     existing_accepted = {
         "proposal_id": "accepted-proposal-123",
         "ontology_id": "http://test.org/ontology/induced#",
         "metadata": {
             "structural_fingerprint": _compute_structural_fingerprint(tables),
             "curation_fingerprint": _compute_curation_fingerprint(tables),
+            "grounding_fingerprint": _compute_grounding_fingerprint(body.grounding_ontology_ids, body.grounding_mode),
         },
     }
-
-    body = WorkbenchInductionRequest(
-        datasource_ids=["ds-1"],
-        ontology_uri_prefix="http://test.org/ontology/induced#",
-        grounding_ontologies=[],
-    )
 
     with (
         patch(

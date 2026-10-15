@@ -64,6 +64,7 @@ def test_emit_called_once_on_duplicate_shortcircuit() -> None:
     from coa_ontology.induce_catalog import (
         WorkbenchInductionRequest,
         _compute_curation_fingerprint,
+        _compute_grounding_fingerprint,
         _compute_structural_fingerprint,
         _jobs,
         _run_induction,
@@ -74,21 +75,22 @@ def test_emit_called_once_on_duplicate_shortcircuit() -> None:
     _jobs["job-dup-metrics"] = job
 
     tables = [_tbl("customers", [CatalogColumn(name="id", dataType="INTEGER")])]
-    # A duplicate is an accepted proposal whose structure AND curated text both
-    # match the current run; a row with no curation fingerprint is deliberately
-    # NOT a duplicate (see _is_duplicate_of), so the fixture must carry both.
+    body = WorkbenchInductionRequest(
+        datasource_ids=["ds-1"],
+        ontology_uri_prefix="http://test.org/ontology/induced#",
+    )
+    # A duplicate is an accepted proposal whose structure, curation AND grounding
+    # pool/mode all match the current run (a row missing any of the three is
+    # deliberately NOT a duplicate — see _is_duplicate_of).
     existing_accepted = {
         "proposal_id": "accepted-proposal-123",
         "ontology_id": "http://test.org/ontology/induced#",
         "metadata": {
             "structural_fingerprint": _compute_structural_fingerprint(tables),
             "curation_fingerprint": _compute_curation_fingerprint(tables),
+            "grounding_fingerprint": _compute_grounding_fingerprint(body.grounding_ontology_ids, body.grounding_mode),
         },
     }
-    body = WorkbenchInductionRequest(
-        datasource_ids=["ds-1"],
-        ontology_uri_prefix="http://test.org/ontology/induced#",
-    )
 
     with (
         patch(
