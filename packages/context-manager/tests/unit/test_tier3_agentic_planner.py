@@ -446,3 +446,31 @@ class TestProposeUnparseableRetry:
         assert "STRUCTURED FACTS COME FROM THE STRUCTURED TOOL" in system
         assert "nl_to_sql" in system
         assert "ONE fact per call" in system
+
+
+@pytest.mark.unit
+class TestJsonExtractionTolerance:
+    @pytest.mark.asyncio
+    async def test_raw_newline_inside_reasoning_string_parses(self):
+        """A literal newline inside the reasoning string (invalid under strict JSON)
+        must not discard the step."""
+        text = (
+            '{"candidates": [{"tool_name": "strategy:entity_based", "inputs": {"query": "q"}, '
+            '"reasoning": "anchor the patient\nthen follow relationships"}]}'
+        )
+        llm = FakeLLM(text=text)
+        planner = BedrockStepPlanner(llm)
+        decisions = await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert [d.tool_name for d in decisions] == ["strategy:entity_based"]
+        assert len(llm.calls) == 1  # parsed first time, no retry
+
+    def test_unescaped_quote_is_still_a_failure(self):
+        bad = '{"candidates": [{"tool_name": "x", "reasoning": "uses the "join" edge"}]}'
+        assert BedrockStepPlanner._extract_json_object(bad) is None
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_asks_for_short_quote_free_reasoning(self):
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert "under 25 words on a single line" in llm.calls[0]["system"]

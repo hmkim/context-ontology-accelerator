@@ -161,7 +161,10 @@ _PROPOSE_SYSTEM = (
     '"is_ad_hoc": <true|false>}]}\n'
     'Set "is_ad_hoc": true ONLY for a generated-from-scratch graph query chosen '
     "because no strategy tool and no template fit. Return an empty candidates "
-    "list ONLY when no tool can make further progress."
+    'list ONLY when no tool can make further progress. Keep each "reasoning" '
+    "under 25 words on a single line, with no double quotes inside it — the "
+    "object is parsed by a strict JSON parser and an invalid object discards "
+    "the whole step."
 )
 
 # Optional chunk-window guidance, appended to the propose prompt ONLY when the
@@ -627,17 +630,26 @@ class BedrockStepPlanner:
         if not text:
             return None
         candidate = text.strip()
+        # ``strict=False`` admits raw control characters (a literal newline or tab
+        # the model wrote inside its "reasoning" string), which the strict parser
+        # rejects as "Invalid control character" — observed as a 600-character,
+        # otherwise well-formed proposal that was thrown away twice in a row.
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate, strict=False)
             return parsed if isinstance(parsed, dict) else None
         except (ValueError, TypeError):
             pass
         first = candidate.find("{")
         last = candidate.rfind("}")
         if first == -1 or last == -1 or last <= first:
+            logger.warning("planner_json_extract_failed", reason="no_object_delimiters", text_chars=len(candidate))
             return None
         try:
-            parsed = json.loads(candidate[first : last + 1])
-        except (ValueError, TypeError):
+            parsed = json.loads(candidate[first : last + 1], strict=False)
+        except (ValueError, TypeError) as exc:
+            # The decoder's own message names the defect and its position
+            # (unescaped quote, missing comma, truncated string), so the raw-head
+            # log line on the caller is attributable without a second guess.
+            logger.warning("planner_json_extract_failed", reason=str(exc)[:160], text_chars=len(candidate))
             return None
         return parsed if isinstance(parsed, dict) else None
