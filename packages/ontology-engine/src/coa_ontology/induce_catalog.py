@@ -148,6 +148,57 @@ def _compute_structural_fingerprint(tables) -> str:
     return hashlib.sha256(str(parts).encode()).hexdigest()[:16]
 
 
+def _compute_curation_fingerprint(tables) -> str:
+    """Deterministic hash of the curated text that feeds the ontology.
+
+    Covers table and column descriptions and synonyms. The structural
+    fingerprint deliberately ignores these — two scans of the same
+    schema must dedupe even when the connector's descriptions differ — but the
+    duplicate check cannot rely on structure alone. A steward who edits
+    descriptions/synonyms in the source catalog (``enrichmentSource =
+    STEWARD_EDITED``) and re-induces changes nothing structural, so the run was
+    short-circuited as a duplicate of the accepted proposal and the curation never
+    reached the ontology, the AOSS class text the NL->SQL prompt is built from, or
+    the ``coa:superseded*`` history that exists precisely to retire the replaced
+    AI text. A duplicate is now a run whose structure AND curation both match.
+    """
+    import hashlib
+
+    parts = []
+    for t in sorted(tables, key=lambda x: x.name):
+        cols = sorted(
+            (c.name, (c.description or "").strip(), tuple(sorted(s.strip() for s in (c.synonyms or []) if s)))
+            for c in t.columns
+        )
+        parts.append(
+            (
+                t.name,
+                (t.description or "").strip(),
+                tuple(sorted(s.strip() for s in (t.synonyms or []) if s)),
+                tuple(cols),
+            )
+        )
+    return hashlib.sha256(str(parts).encode()).hexdigest()[:16]
+
+
+def _is_duplicate_of(existing_meta: dict, fingerprint: str, curation_fingerprint: str) -> bool:
+    """Decide whether an accepted proposal makes the current run redundant.
+
+    Structure must match. Curation must match too — except for an accepted
+    proposal written before curation fingerprints existed (no
+    ``curation_fingerprint`` in its metadata): nothing proves its text equals the
+    catalog's current text, so it is NOT treated as a duplicate. That lets one
+    re-induction through for such namespaces (the steward may reject the proposal
+    if nothing changed); the new proposal then carries both fingerprints.
+    """
+    if existing_meta.get("structural_fingerprint") != fingerprint:
+        return False
+    stored = existing_meta.get("curation_fingerprint")
+    if stored is None:
+        return False
+    return stored == curation_fingerprint
+
+
 def _floats_to_decimal(obj):
     """Recursively convert float values to Decimal for DynamoDB compatibility."""
     if isinstance(obj, float):
@@ -783,13 +834,17 @@ def _run_induction(
             if not all_tables:
                 raise ValueError(f"No tables found in datasources: {body.datasource_ids}")
 
-            # Duplicate detection: check if an accepted proposal with identical
-            # structure already exists. Compares table names + column names/types + FKs.
+            # Duplicate detection: an accepted proposal with identical structure
+            # (table names + column names/types + FKs) AND identical curation
+            # (table/column descriptions + synonyms) makes this run redundant. The
+            # curation half is what lets a steward's description edits re-induce
+            # into a new proposal instead of being swallowed as a duplicate.
             fingerprint = _compute_structural_fingerprint(all_tables)
+            curation_fingerprint = _compute_curation_fingerprint(all_tables)
             existing_accepted = dynamo_store.list_proposals(namespace=ns, status="accepted")
             for existing in existing_accepted:
                 e_meta = existing.get("metadata") or {}
-                if e_meta.get("structural_fingerprint") == fingerprint:
+                if _is_duplicate_of(e_meta, fingerprint, curation_fingerprint):
                     job.status = schemas_mod.JobStatus.COMPLETED
                     # Surface duplicate_of on the in-memory job too, not just the DDB
                     # row: the /jobs/{id} poll returns this object while the worker
@@ -1035,6 +1090,7 @@ def _run_induction(
                     # per-candidate lists blow the 400 KB DynamoDB item limit on wide schemas.
                     "grounding_ontologies_used": grounding_report_uris,
                     "structural_fingerprint": fingerprint,
+                    "curation_fingerprint": curation_fingerprint,
                     "has_constraint_config": True,
                 },
             )
