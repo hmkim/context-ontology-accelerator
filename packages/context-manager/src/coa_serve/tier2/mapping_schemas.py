@@ -55,12 +55,28 @@ def table_schemas_from_r2rml(r2rml: str | bytes) -> dict[str, str]:
     dropped from the map (ambiguous — the qualifier refuses those statements
     upstream), so the result never asserts a schema it cannot be sure of.
     """
+    return _project_r2rml(r2rml, _SCL.sourceSchema, "mapping_schemas_ambiguous_dropped")
+
+
+def table_sources_from_r2rml(r2rml: str | bytes) -> dict[str, str]:
+    """Project an R2RML mapping to ``{bare_table_lower: datasource_id}``.
+
+    The inducer annotates every TriplesMap with ``coa:datasourceId`` — the source
+    the table was scanned from — so the published mapping is an authoritative
+    table->source attribution for EVERY mapped table of the namespace, not only the
+    ones a particular retrieval happened to return. Same ambiguity rule as
+    :func:`table_schemas_from_r2rml`: a bare name two sources both expose is dropped.
+    """
+    return _project_r2rml(r2rml, _SCL.datasourceId, "mapping_sources_ambiguous_dropped")
+
+
+def _project_r2rml(r2rml: str | bytes, predicate: Any, dropped_event: str) -> dict[str, str]:
     graph = Graph()
     graph.parse(data=r2rml if isinstance(r2rml, str) else r2rml.decode(), format="turtle")
     claims: dict[str, set[str]] = {}
     for tmap in set(graph.subjects(_RR.logicalTable, None)):
-        schema = graph.value(tmap, _SCL.sourceSchema)
-        if schema is None:
+        value = graph.value(tmap, predicate)
+        if value is None:
             continue
         for logical in graph.objects(tmap, _RR.logicalTable):
             name = graph.value(logical, _RR.tableName)
@@ -71,16 +87,16 @@ def table_schemas_from_r2rml(r2rml: str | bytes) -> dict[str, str]:
                 continue
             bare = parts[-1].strip().lower()
             if bare:
-                claims.setdefault(bare, set()).add(str(schema))
-    result = {bare: next(iter(schemas)) for bare, schemas in claims.items() if len(schemas) == 1}
-    dropped = sorted(bare for bare, schemas in claims.items() if len(schemas) > 1)
+                claims.setdefault(bare, set()).add(str(value))
+    result = {bare: next(iter(values)) for bare, values in claims.items() if len(values) == 1}
+    dropped = sorted(bare for bare, values in claims.items() if len(values) > 1)
     if dropped:
-        logger.info("mapping_schemas_ambiguous_dropped", tables=dropped)
+        logger.info(dropped_event, tables=dropped)
     return result
 
 
 class MappingSchemaResolver:
-    """Cached ``namespace -> {table: schema}`` lookups over the published mapping."""
+    """Cached ``namespace -> {table: schema}`` / ``{table: datasource}`` lookups over the published mapping."""
 
     def __init__(
         self,
@@ -95,7 +111,9 @@ class MappingSchemaResolver:
         self._prefix = prefix if prefix.endswith("/") else prefix + "/"
         self._ttl_s = ttl_s
         self._s3 = s3_client
-        self._cache: dict[str, tuple[float, dict[str, str]]] = {}
+        # One cache entry per namespace holds BOTH projections of the same read:
+        # (expiry, {table: schema}, {table: datasource_id}).
+        self._cache: dict[str, tuple[float, dict[str, str], dict[str, str]]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         if self._bucket:
             logger.info("mapping_schemas_enabled", bucket=self._bucket, prefix=self._prefix)
@@ -119,22 +137,29 @@ class MappingSchemaResolver:
 
     async def schemas_for(self, namespace: str) -> dict[str, str]:
         """Return the namespace's ``{bare_table: schema}`` map (``{}`` on any failure)."""
+        return (await self._maps_for(namespace))[0]
+
+    async def sources_for(self, namespace: str) -> dict[str, str]:
+        """Return the namespace's ``{bare_table: datasource_id}`` map (``{}`` on any failure)."""
+        return (await self._maps_for(namespace))[1]
+
+    async def _maps_for(self, namespace: str) -> tuple[dict[str, str], dict[str, str]]:
         if not self._bucket or not namespace:
-            return {}
+            return {}, {}
         now = time.monotonic()
         cached = self._cache.get(namespace)
         if cached and cached[0] > now:
-            return cached[1]
+            return cached[1], cached[2]
         lock = self._locks.setdefault(namespace, asyncio.Lock())
         async with lock:
             cached = self._cache.get(namespace)
             if cached and cached[0] > time.monotonic():
-                return cached[1]
-            mapping = await asyncio.to_thread(self._load, namespace)
-            self._cache[namespace] = (time.monotonic() + self._ttl_s, mapping)
-            return mapping
+                return cached[1], cached[2]
+            schemas, sources = await asyncio.to_thread(self._load, namespace)
+            self._cache[namespace] = (time.monotonic() + self._ttl_s, schemas, sources)
+            return schemas, sources
 
-    def _load(self, namespace: str) -> dict[str, str]:
+    def _load(self, namespace: str) -> tuple[dict[str, str], dict[str, str]]:
         key = self._key(namespace)
         try:
             body = self._client().get_object(Bucket=self._bucket, Key=key)["Body"].read()
@@ -145,19 +170,21 @@ class MappingSchemaResolver:
                 key=key,
                 error=type(exc).__name__,
             )
-            return {}
+            return {}, {}
         try:
             schemas = table_schemas_from_r2rml(body)
+            sources = table_sources_from_r2rml(body)
         except Exception as exc:  # noqa: BLE001 — a malformed mapping must not fail the query
             logger.warning("mapping_schemas_parse_failed", namespace=namespace, error=type(exc).__name__)
-            return {}
+            return {}, {}
         logger.info(
             "mapping_schemas_loaded",
             namespace=namespace,
             tables=len(schemas),
             schemas=sorted(set(schemas.values())),
+            sources=len(set(sources.values())),
         )
-        return schemas
+        return schemas, sources
 
     def invalidate(self, namespace: str | None = None) -> None:
         """Drop the cached map for ``namespace`` (or every namespace when None)."""
