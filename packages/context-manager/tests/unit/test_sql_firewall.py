@@ -873,3 +873,58 @@ class TestNamespaceSQLScope:
         schema_only only affects the unqualified-catalog case."""
         with pytest.raises(NamespaceSQLScopeError, match="not available in the requested namespace"):
             self._validate_jdbc("SELECT * FROM sclds_b.sales.customers")
+
+
+@pytest.mark.unit
+class TestEngineDialectParsing:
+    """The NL->SQL strategy generates SQL in the SOURCE engine's dialect and must
+    evaluate it with that parser. Under the trino default, valid T-SQL (``TOP n``,
+    ``CONVERT(type, x, style)``) failed to parse and was discarded as unsafe."""
+
+    TSQL_TOP = (
+        "SELECT (SELECT TOP 1 m.value_as_number FROM measurement m WHERE m.person_id = 710 "
+        "ORDER BY m.measurement_date DESC, m.measurement_id DESC) AS hba1c"
+    )
+    TSQL_CONVERT = (
+        "SELECT (CAST(CONVERT(CHAR(8), CAST('2026-09-30' AS DATE), 112) AS INT) "
+        "- CAST(CONVERT(CHAR(8), p.birth_datetime, 112) AS INT)) / 10000 AS age FROM person p"
+    )
+
+    def test_tsql_top_subquery_rejected_under_trino_default(self):
+        fw = SQLFirewall()
+        with pytest.raises(UnsafeSQLError):
+            fw.evaluate(self.TSQL_TOP, {"columnDenylist": {"pt_master": ["rrn"]}})
+
+    def test_tsql_top_subquery_allowed_with_engine_dialect(self):
+        fw = SQLFirewall()
+        result = fw.evaluate(self.TSQL_TOP, {"columnDenylist": {"pt_master": ["rrn"]}}, dialect="tsql")
+        assert not result.denied
+
+    def test_tsql_convert_style_allowed_with_engine_dialect(self):
+        fw = SQLFirewall()
+        result = fw.evaluate(self.TSQL_CONVERT, {"columnDenylist": {"pt_master": ["rrn"]}}, dialect="tsql")
+        assert not result.denied
+
+    def test_denylist_still_enforced_under_engine_dialect(self):
+        fw = SQLFirewall()
+        result = fw.evaluate(
+            "SELECT TOP 5 patient_no, rrn FROM pt_master",
+            {"columnDenylist": {"pt_master": ["rrn"]}},
+            dialect="tsql",
+        )
+        assert result.denied
+        assert "rrn" in (result.reason or "")
+
+    def test_extract_tables_uses_engine_dialect(self):
+        assert SQLFirewall.extract_tables(self.TSQL_TOP) == []  # trino cannot parse TOP
+        assert SQLFirewall.extract_tables(self.TSQL_TOP, "tsql") == ["measurement"]
+
+    def test_prompt_dialect_alias_and_unknown_name_do_not_raise(self):
+        from coa_serve.tier2.sql_firewall import normalize_dialect
+
+        assert normalize_dialect("postgresql") == "postgres"
+        assert normalize_dialect("tsql") == "tsql"
+        assert normalize_dialect(None) == "trino"
+        assert normalize_dialect("not-a-dialect") == "trino"
+        fw = SQLFirewall()
+        assert not fw.evaluate("SELECT 1 AS x FROM orders", {}, dialect="postgresql").denied
