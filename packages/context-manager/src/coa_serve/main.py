@@ -722,6 +722,29 @@ async def _persist_turn(
         logger.warning("sse_persist_turn_failed", session_id=session_id, exc_info=True)
 
 
+def _audit_fields(profile: dict | None) -> dict:
+    """Principal fields for the per-query audit log lines.
+
+    Read from the RESOLVED profile (``ResolvedProfile.inject_into``), never from
+    the caller-supplied body: ``userId`` is the JWT subject when a JWT was
+    forwarded, and the role names are the grants resolved for this namespace.
+    Column/table restrictions themselves are not logged (they are policy, not
+    identity). Values are bounded so a hostile profile cannot bloat the log.
+    """
+    prof = profile or {}
+    roles: list[str] = []
+    for rr in prof.get("resourceRoles") or []:
+        name = rr.get("role") if isinstance(rr, dict) else rr
+        if name is not None:
+            roles.append(str(name)[:64])
+    for gr in prof.get("globalRoles") or []:
+        roles.append(str(gr)[:64])
+    return {
+        "user_id": str(prof.get("userId") or "unknown")[:128],
+        "roles": sorted(set(roles))[:16],
+    }
+
+
 async def _handle_blocking_query(request, request_id: str):
     """Non-streaming query resolution. Yields a single result dict."""
     resolve_start = time.perf_counter()
@@ -743,7 +766,15 @@ async def _handle_blocking_query(request, request_id: str):
         return
     except AccessDeniedError as e:
         total_ms = int((time.perf_counter() - resolve_start) * 1000)
-        logger.warning("orchestrator_access_denied", request_id=request_id, reason=e.reason)
+        # Audit line: WHO was denied WHAT. The reason names the denied columns /
+        # namespace; the principal and roles come from the resolved profile.
+        logger.warning(
+            "orchestrator_access_denied",
+            request_id=request_id,
+            reason=e.reason,
+            namespace=request.namespace,
+            **_audit_fields(request.profile),
+        )
         d = e.to_dict(request_id)
         d["metadata"] = {"totalMs": total_ms}
         yield d
@@ -869,7 +900,13 @@ async def _handle_streaming_query(payload: dict, request, request_id: str, sessi
         logger.error("sse_timeout", request_id=request_id, total_ms=total_ms)
         yield emitter.format_error("TimeoutError", "Query resolution timed out", 504)
     except AccessDeniedError as e:
-        logger.warning("sse_access_denied", request_id=request_id, reason=e.reason)
+        logger.warning(
+            "sse_access_denied",
+            request_id=request_id,
+            reason=e.reason,
+            namespace=request.namespace,
+            **_audit_fields(request.profile),
+        )
         yield emitter.format_error("AccessDenied", "Access denied", 403)
     except NoResultError as e:
         logger.info("sse_no_result", request_id=request_id, tier=e.tier)
@@ -1221,11 +1258,18 @@ async def invoke(payload: dict, context=None):
         )
         resolved.inject_into(request.profile)
 
+    # Audit line: every query is attributable to its principal (JWT subject when
+    # forwarded) and the roles resolved for the namespace, so a later
+    # ``*_access_denied`` or firewall decision for the same request_id can be
+    # attributed to a user without a second lookup.
     logger.info(
         "invoke",
         namespace=request.namespace,
         query_length=len(request.query),
         request_id=request_id,
+        session_id=payload.get("sessionId"),
+        stream=bool(payload.get("stream", False)),
+        **_audit_fields(request.profile),
     )
 
     # ── Determine streaming mode ──────────────────────────────────────────
