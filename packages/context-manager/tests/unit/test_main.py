@@ -1181,3 +1181,36 @@ class TestTier2QualifierWiring:
                 f"(table_qualifier needs the "
                 f"registry to resolve each table's Athena catalog). Got kwargs={sorted(kwargs)}."
             )
+
+
+@pytest.mark.unit
+class TestAuditFields:
+    """Per-query audit fields come from the RESOLVED profile and are bounded."""
+
+    def test_reads_principal_and_role_names_from_resolved_profile(self):
+        from coa_serve.main import _audit_fields
+
+        prof = {
+            "userId": "sub-123",
+            "email": "analyst@example.org",
+            "resourceRoles": [{"role": "data-analyst", "resourceUID": "ns-1"}],
+            "globalRoles": ["viewer"],
+            "columnDenylist": {"pt_master": ["rrn"]},
+        }
+        fields = _audit_fields(prof)
+        assert fields == {"user_id": "sub-123", "roles": ["data-analyst", "viewer"]}
+        assert "email" not in fields and "columnDenylist" not in fields
+
+    def test_unknown_principal_and_empty_profile(self):
+        from coa_serve.main import _audit_fields
+
+        assert _audit_fields(None) == {"user_id": "unknown", "roles": []}
+        assert _audit_fields({})["user_id"] == "unknown"
+
+    def test_values_are_bounded(self):
+        from coa_serve.main import _audit_fields
+
+        prof = {"userId": "x" * 500, "globalRoles": [f"r{i}" for i in range(40)]}
+        fields = _audit_fields(prof)
+        assert len(fields["user_id"]) == 128
+        assert len(fields["roles"]) == 16
