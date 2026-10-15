@@ -370,3 +370,107 @@ class TestLazyImportInvariant:
             f"importing planner leaked graphrag_toolkit or failed.\nstdout={result.stdout}\nstderr={result.stderr}"
         )
         assert "OK" in result.stdout
+
+
+@pytest.mark.unit
+class TestPlannerMaxTokensForwarding:
+    """The configured planner output cap reaches both planner Converse calls (finding 16)."""
+
+    @pytest.mark.asyncio
+    async def test_propose_and_assess_use_configured_max_tokens(self):
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm, max_tokens=2048)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        await planner.assess(sub_question=_sq(), context=AccumulatedContext())
+        assert [c["max_tokens"] for c in llm.calls] == [2048, 2048]
+
+    @pytest.mark.asyncio
+    async def test_default_max_tokens_is_1024(self):
+        llm = FakeLLM(text="{}")
+        planner = BedrockStepPlanner(llm)
+        await planner.assess(sub_question=_sq(), context=AccumulatedContext())
+        assert llm.calls[0]["max_tokens"] == 1024
+
+
+class SequenceLLM(FakeLLM):
+    """FakeLLM returning a different scripted text on each converse call."""
+
+    def __init__(self, texts):
+        super().__init__(text=texts[0])
+        self._texts = list(texts)
+
+    async def converse(self, **kwargs):
+        self._text = self._texts.pop(0) if self._texts else self._text
+        return await super().converse(**kwargs)
+
+
+@pytest.mark.unit
+class TestProposeUnparseableRetry:
+    @pytest.mark.asyncio
+    async def test_retries_once_and_uses_the_second_reply(self):
+        """One malformed reply (truncated JSON, prose) must not end the sub-question
+        with zero tool calls: re-ask once, parse the second reply."""
+        good = '{"candidates": [{"tool_name": "strategy:entity_based", "inputs": {"query": "q"}}]}'
+        llm = SequenceLLM(['{"candidates": [{"tool_name": "strat', good])
+        planner = BedrockStepPlanner(llm)
+        decisions = await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert len(llm.calls) == 2
+        assert [d.tool_name for d in decisions] == ["strategy:entity_based"]
+        # identical re-ask: same prompt/system/temperature
+        assert llm.calls[0]["prompt"] == llm.calls[1]["prompt"]
+        assert llm.calls[0]["system"] == llm.calls[1]["system"]
+
+    @pytest.mark.asyncio
+    async def test_two_unparseable_replies_degrade_to_empty(self):
+        llm = SequenceLLM(["not json", "still not json"])
+        planner = BedrockStepPlanner(llm)
+        decisions = await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert decisions == []
+        assert len(llm.calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_parseable_first_reply_is_not_retried(self):
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert len(llm.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_routes_recorded_values_to_the_structured_tool(self):
+        """Recorded per-entity values (lab results, counts, dates) go to nl_to_sql
+        early, one fact per call — document/graph retrieval cannot return them."""
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        system = llm.calls[0]["system"]
+        assert "STRUCTURED FACTS COME FROM THE STRUCTURED TOOL" in system
+        assert "nl_to_sql" in system
+        assert "ONE fact per call" in system
+
+
+@pytest.mark.unit
+class TestJsonExtractionTolerance:
+    @pytest.mark.asyncio
+    async def test_raw_newline_inside_reasoning_string_parses(self):
+        """A literal newline inside the reasoning string (invalid under strict JSON)
+        must not discard the step."""
+        text = (
+            '{"candidates": [{"tool_name": "strategy:entity_based", "inputs": {"query": "q"}, '
+            '"reasoning": "anchor the patient\nthen follow relationships"}]}'
+        )
+        llm = FakeLLM(text=text)
+        planner = BedrockStepPlanner(llm)
+        decisions = await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert [d.tool_name for d in decisions] == ["strategy:entity_based"]
+        assert len(llm.calls) == 1  # parsed first time, no retry
+
+    def test_unescaped_quote_is_still_a_failure(self):
+        bad = '{"candidates": [{"tool_name": "x", "reasoning": "uses the "join" edge"}]}'
+        assert BedrockStepPlanner._extract_json_object(bad) is None
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_asks_for_short_quote_free_reasoning(self):
+        llm = FakeLLM(text='{"candidates": []}')
+        planner = BedrockStepPlanner(llm)
+        await planner.propose_steps(sub_question=_sq(), context=AccumulatedContext(), tool_specs=_SPECS)
+        assert "under 25 words on a single line" in llm.calls[0]["system"]

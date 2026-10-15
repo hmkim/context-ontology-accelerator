@@ -381,10 +381,36 @@ async def _ensure_initialized():
                 llm=bedrock_client,
                 query_executor=query_executor,
             )
+            # Planner-role client. The planner (step selection, sufficiency
+            # assessment, decomposition) emits a few hundred tokens of JSON per
+            # call, so it does not need the reasoning query model: with adaptive
+            # thinking ON (the Claude 5 default even when `thinking` is omitted)
+            # each planner call took 13-23 s and the thinking consumed most of the
+            # 1,024-token output cap, truncating the JSON. When
+            # DEEP_REASONING_PLANNER_MODEL_ID is set, a separate client is built
+            # for that model (same region/guardrail version), optionally with
+            # thinking disabled; synthesis keeps the query model and its thinking.
+            planner_client = bedrock_client
+            if config.deep_reasoning_planner_model_id:
+                planner_fields = (
+                    {"thinking": {"type": "disabled"}} if config.deep_reasoning_planner_thinking == "disabled" else None
+                )
+                planner_client = BedrockLLMClient(
+                    model_id=config.deep_reasoning_planner_model_id,
+                    region=config.bedrock_region,
+                    additional_model_request_fields=planner_fields,
+                )
+                logger.info(
+                    "deep_reasoning_planner_client_configured",
+                    model_id=config.deep_reasoning_planner_model_id,
+                    thinking=config.deep_reasoning_planner_thinking,
+                    max_tokens=config.deep_reasoning_planner_max_tokens,
+                )
             step_planner = BedrockStepPlanner(
-                bedrock_client,
+                planner_client,
                 guardrail_id=config.guardrail_id or None,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
+                max_tokens=config.deep_reasoning_planner_max_tokens,
             )
             agentic_retriever = build_agentic_retriever(
                 config,
@@ -392,6 +418,7 @@ async def _ensure_initialized():
                 step_planner,
                 structured_query_tier=structured_query_tier,
                 guardrail_id_provider=guardrail_provider.guardrail_id,
+                decomposition_client=planner_client,
             )
         except Exception as exc:
             logger.warning("agentic_retriever_unavailable", error=type(exc).__name__, error_msg=str(exc)[:200])

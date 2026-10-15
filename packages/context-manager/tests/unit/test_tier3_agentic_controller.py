@@ -803,3 +803,43 @@ class TestLazyImportInvariant:
             f"importing controller leaked graphrag_toolkit or failed.\nstdout={result.stdout}\nstderr={result.stderr}"
         )
         assert "OK" in result.stdout
+
+
+# ── tail-waste guard: no step once no useful tool time remains ─────────
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestToolTimeExhaustedStop:
+    async def test_stops_without_a_planner_call_when_only_the_reserve_is_left(self):
+        """Budget 110 / reserve 25: at t=86 a tool could get <1 s, so the loop must
+        end (time_budget_expired) before consulting the planner — previously it ran
+        a 4-20 s planner call followed by a 1 ms tool timeout, several times over."""
+        tool = FakeTool("strategy:entity_based", input_schema={"query": "str"})
+        registry = make_registry(tool)
+        clock, src = make_clock(time_budget_s=110, synthesis_reserve_s=25, max_steps=10)
+        src.advance(86)  # remaining 24 < reserve 25 -> usable negative, but not expired
+        planner = ScriptedPlanner(
+            [[PlannerDecision(tool_name="strategy:entity_based", inputs={"query": "q"})]],
+            repeat_last=True,
+        )
+        stop, _ctx, _queue, trace = await run_loop(planner, registry, clock=clock)
+        assert stop == StopReason.time_budget_expired
+        assert planner.propose_calls == 0
+        assert tool.calls == []
+        assert any("tool_time_exhausted" in str(s.detail) for s in find_step(trace, "next_step_select"))
+
+    async def test_a_useful_window_still_runs_the_step(self):
+        """With a few seconds of usable time left the step runs as before."""
+        tool = FakeTool("strategy:entity_based", input_schema={"query": "str"})
+        registry = make_registry(tool)
+        clock, src = make_clock(time_budget_s=110, synthesis_reserve_s=25, max_steps=1)
+        src.advance(80)  # usable 5 s
+        planner = ScriptedPlanner(
+            [[PlannerDecision(tool_name="strategy:entity_based", inputs={"query": "q"})]],
+            repeat_last=True,
+            default_sufficiency=False,
+        )
+        stop, _ctx, _queue, _trace = await run_loop(planner, registry, clock=clock)
+        assert stop == StopReason.max_steps_reached
+        assert len(tool.calls) == 1

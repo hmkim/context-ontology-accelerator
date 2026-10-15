@@ -103,6 +103,21 @@ class ServiceConfig:
     # Wall-clock seconds reserved at session end for the final synthesis call, so
     # a late tool invocation cannot push synthesis past the time budget.
     deep_reasoning_synthesis_reserve_s: int = 8
+    # Deep-reasoning PLANNER model (step selection, sufficiency assessment,
+    # decomposition). Empty = reuse the query model client (prior behaviour). The
+    # planner emits a few hundred tokens of JSON per call, so a reasoning-class
+    # query model with adaptive thinking ON spends most of the time budget (and
+    # most of its 1,024-token output cap) thinking before the JSON; observed
+    # 13-23 s per step and 164-char truncated JSON on a 110 s budget. A small
+    # non-thinking model keeps the budget for the tools.
+    deep_reasoning_planner_model_id: str = ""
+    # "disabled" sends additionalModelRequestFields.thinking.type=disabled on the
+    # planner client (Claude 5-class models think by default even when the field
+    # is omitted); "default" sends nothing. Ignored when the planner reuses the
+    # query client, which must keep its own thinking behaviour for synthesis.
+    deep_reasoning_planner_thinking: str = "default"
+    # Output-token cap for planner/assess calls (code default 1024, 1024..8192).
+    deep_reasoning_planner_max_tokens: int = 1024
     # Consecutive no-progress steps a sub-question loop tolerates before stopping
     # with no_new_information. Higher = more escalation attempts (switch tool,
     # reframe, switch modality) before giving up. 1 restores stop-on-first. Kept
@@ -266,6 +281,18 @@ def load_config() -> ServiceConfig:
     deep_reasoning_max_fanout = _parse_int_in_range("DEEP_REASONING_MAX_FANOUT", 5, 1, 20)
     deep_reasoning_synthesis_reserve_s = _parse_int_in_range("DEEP_REASONING_SYNTHESIS_RESERVE_S", 8, 0, 120)
     deep_reasoning_max_no_progress_steps = _parse_int_in_range("DEEP_REASONING_MAX_NO_PROGRESS_STEPS", 2, 1, 20)
+    deep_reasoning_planner_model_id = (env_with_legacy_name("DEEP_REASONING_PLANNER_MODEL_ID", "") or "").strip()
+    deep_reasoning_planner_thinking = (
+        (env_with_legacy_name("DEEP_REASONING_PLANNER_THINKING", "default") or "default").strip().lower()
+    )
+    if deep_reasoning_planner_thinking not in ("default", "disabled"):
+        logger.warning(
+            "invalid_deep_reasoning_planner_thinking",
+            value=deep_reasoning_planner_thinking,
+            fallback="default",
+        )
+        deep_reasoning_planner_thinking = "default"
+    deep_reasoning_planner_max_tokens = _parse_int_in_range("DEEP_REASONING_PLANNER_MAX_TOKENS", 1024, 1024, 8192)
     deep_reasoning_ontology_source = env_with_legacy_name("DEEP_REASONING_ONTOLOGY_SOURCE", "graph")
     if deep_reasoning_ontology_source not in ("graph", "file"):
         logger.warning(
@@ -335,6 +362,9 @@ def load_config() -> ServiceConfig:
         deep_reasoning_per_tool_timeout_s=deep_reasoning_per_tool_timeout_s,
         deep_reasoning_max_fanout=deep_reasoning_max_fanout,
         deep_reasoning_synthesis_reserve_s=deep_reasoning_synthesis_reserve_s,
+        deep_reasoning_planner_model_id=deep_reasoning_planner_model_id,
+        deep_reasoning_planner_thinking=deep_reasoning_planner_thinking,
+        deep_reasoning_planner_max_tokens=deep_reasoning_planner_max_tokens,
         deep_reasoning_max_no_progress_steps=deep_reasoning_max_no_progress_steps,
         deep_reasoning_ontology_source=deep_reasoning_ontology_source,
         deep_reasoning_ontology_file=deep_reasoning_ontology_file,

@@ -228,3 +228,31 @@ class TestAggregateCapsAreSharedAcrossBranches:
         assert clock.try_open_branch() is True
         assert clock.try_open_branch() is False  # aggregate cap of 3 reached
         assert clock.branches_opened == 3
+
+
+@pytest.mark.unit
+class TestToolTimeExhausted:
+    """Tail-waste guard: once remaining - reserve is below one useful tool window,
+    the controller must not start another planner+tool step."""
+
+    def test_false_early_in_session(self):
+        fake = FakeClock()
+        clock = BudgetClock(AgenticBudgetConfig(time_budget_s=30, synthesis_reserve_s=8), clock=fake)
+        clock.started()
+        assert clock.tool_time_exhausted() is False
+
+    def test_true_once_only_the_reserve_is_left(self):
+        fake = FakeClock()
+        clock = BudgetClock(AgenticBudgetConfig(time_budget_s=30, synthesis_reserve_s=8), clock=fake)
+        clock.started()
+        fake.advance(21.5)  # remaining 8.5; usable 0.5 < 1.0
+        assert clock.tool_time_exhausted() is True
+        assert clock.expired() is False  # distinct from the hard budget edge
+
+    def test_threshold_is_configurable(self):
+        fake = FakeClock()
+        clock = BudgetClock(AgenticBudgetConfig(time_budget_s=30, synthesis_reserve_s=8), clock=fake)
+        clock.started()
+        fake.advance(18)  # usable 4.0
+        assert clock.tool_time_exhausted(min_useful_s=1.0) is False
+        assert clock.tool_time_exhausted(min_useful_s=5.0) is True

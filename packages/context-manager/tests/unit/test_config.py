@@ -576,3 +576,49 @@ class TestValidLexicalRetrieverStrategiesFallback:
 
         # Default value still loads cleanly.
         assert config.lexical_retriever_strategy == "chunk_based_semantic"
+
+
+@pytest.mark.unit
+class TestDeepReasoningPlannerConfig:
+    """Planner-role model knobs (finding 16: planner on a non-thinking small model)."""
+
+    def _ssm(self, mock_boto3):
+        mock_ssm = MagicMock()
+        mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "gr-test"}}
+        mock_boto3.client.return_value = mock_ssm
+
+    @patch("coa_serve.config.boto3")
+    def test_planner_defaults_reuse_query_model(self, mock_boto3):
+        self._ssm(mock_boto3)
+        config = load_config()
+        assert config.deep_reasoning_planner_model_id == ""
+        assert config.deep_reasoning_planner_thinking == "default"
+        assert config.deep_reasoning_planner_max_tokens == 1024
+
+    @patch.dict(
+        "os.environ",
+        {
+            "DEEP_REASONING_PLANNER_MODEL_ID": " global.anthropic.claude-haiku-5-5 ",
+            "DEEP_REASONING_PLANNER_THINKING": "Disabled",
+            "DEEP_REASONING_PLANNER_MAX_TOKENS": "2048",
+        },
+    )
+    @patch("coa_serve.config.boto3")
+    def test_planner_env_overrides(self, mock_boto3):
+        self._ssm(mock_boto3)
+        config = load_config()
+        assert config.deep_reasoning_planner_model_id == "global.anthropic.claude-haiku-5-5"
+        assert config.deep_reasoning_planner_thinking == "disabled"
+        assert config.deep_reasoning_planner_max_tokens == 2048
+
+    @patch.dict(
+        "os.environ",
+        {"DEEP_REASONING_PLANNER_THINKING": "off", "DEEP_REASONING_PLANNER_MAX_TOKENS": "512"},
+    )
+    @patch("coa_serve.config.boto3")
+    def test_planner_invalid_values_fall_back(self, mock_boto3):
+        """Unknown thinking mode -> default; below-range cap -> default (never shrinks)."""
+        self._ssm(mock_boto3)
+        config = load_config()
+        assert config.deep_reasoning_planner_thinking == "default"
+        assert config.deep_reasoning_planner_max_tokens == 1024

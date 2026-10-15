@@ -276,6 +276,7 @@ def build_agentic_retriever(
     embed_client: LLMClient | None = None,
     structured_query_tier: Any | None = None,
     guardrail_id_provider: Callable[[], str] | None = None,
+    decomposition_client: LLMClient | None = None,
 ) -> AgenticRetriever:
     """Compose the :class:`AgenticRetriever` from the registry and its collaborators.
 
@@ -310,6 +311,11 @@ def build_agentic_retriever(
             each call; forwarded to the :class:`Synthesizer` and
             :class:`DecompositionPlanner` so an operator's SSM guardrail change
             reaches the warm agentic path without a redeploy.
+        decomposition_client: Optional LLM client for the planner-side
+            decomposition call; defaults to ``clients.llm``. Startup wiring passes
+            the same small non-thinking client it gives the step planner, so every
+            planning-role call shares one model while synthesis keeps the query
+            model.
 
     Returns:
         The composed :class:`AgenticRetriever`.
@@ -337,7 +343,7 @@ def build_agentic_retriever(
         max_prompt_chunks=None,
     )
     decomposer = DecompositionPlanner(
-        clients.llm,
+        decomposition_client if decomposition_client is not None else clients.llm,
         guardrail_id=config.guardrail_id or None,
         guardrail_id_provider=guardrail_id_provider,
     )

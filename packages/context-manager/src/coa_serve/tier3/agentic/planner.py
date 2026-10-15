@@ -143,6 +143,13 @@ _PROPOSE_SYSTEM = (
     "- switch modality: if semantic/chunk retrieval found nothing useful, anchor "
     "the relevant entity (entity-based retrieval or a keyword graph traversal) and "
     "then follow its ontology relationships with a graph traversal, or vice-versa.\n\n"
+    "STRUCTURED FACTS COME FROM THE STRUCTURED TOOL. When the sub-question needs a "
+    "specific recorded value for a named patient/entity (a latest lab result, a "
+    "measurement, a count, a prescription period, a date) and a structured query "
+    "tool (name starting with 'nl_to_sql') is in the catalog, select it EARLY — "
+    "document/graph retrieval returns narrative text, not the recorded values. Ask it "
+    "for ONE fact per call (e.g. 'latest HbA1c value and date for patient 710'), not "
+    "a combined report of several facts, so the row limit cannot truncate the answer.\n\n"
     f"{TOOL_PREFERENCE_INSTRUCTION}\n\n"
     "Each tool spec lists its name, a description, and an input_schema declaring "
     "the accepted input fields and their types. Populate inputs that conform to "
@@ -154,7 +161,10 @@ _PROPOSE_SYSTEM = (
     '"is_ad_hoc": <true|false>}]}\n'
     'Set "is_ad_hoc": true ONLY for a generated-from-scratch graph query chosen '
     "because no strategy tool and no template fit. Return an empty candidates "
-    "list ONLY when no tool can make further progress."
+    'list ONLY when no tool can make further progress. Keep each "reasoning" '
+    "under 25 words on a single line, with no double quotes inside it — the "
+    "object is parsed by a strict JSON parser and an invalid object discards "
+    "the whole step."
 )
 
 # Optional chunk-window guidance, appended to the propose prompt ONLY when the
@@ -273,24 +283,47 @@ class BedrockStepPlanner:
         system = _PROPOSE_SYSTEM
         if any((spec.get("name") if isinstance(spec, dict) else "") == "chunk_window" for spec in tool_specs):
             system += _CHUNK_WINDOW_INSTRUCTION
-        try:
-            result = await self._planner.converse(
-                prompt=prompt,
-                system=system,
-                guardrail_id=self._effective_guardrail_id(),
-                guard_content=f"Question: {question}",
-                temperature=0.0,
-                max_tokens=self._max_tokens,
-            )
-        except Exception as exc:  # noqa: BLE001 - planner must never raise (Req 4.7)
-            logger.warning("planner_propose_error", error=str(exc), error_type=type(exc).__name__)
-            return []
 
-        if getattr(result, "guardrail_blocked", False):
-            logger.warning("planner_propose_guardrail_blocked")
-            return []
+        # An unparseable proposal is retried ONCE. The controller treats an empty
+        # candidate list as "no tool selectable" and ends the sub-question, so a
+        # single malformed JSON (a truncated or prose-wrapped reply — observed on
+        # ~3% of planner calls) used to cost the whole sub-question its retrieval,
+        # leaving the synthesizer with zero tool results. The retry is a plain
+        # re-ask at temperature 0 with the same prompt; a second failure still
+        # degrades to [] exactly as before (Req 4.7).
+        for attempt in range(2):
+            try:
+                result = await self._planner.converse(
+                    prompt=prompt,
+                    system=system,
+                    guardrail_id=self._effective_guardrail_id(),
+                    guard_content=f"Question: {question}",
+                    temperature=0.0,
+                    max_tokens=self._max_tokens,
+                )
+            except Exception as exc:  # noqa: BLE001 - planner must never raise (Req 4.7)
+                logger.warning("planner_propose_error", error=str(exc), error_type=type(exc).__name__)
+                return []
 
-        return self._parse_candidates(result.text)
+            if getattr(result, "guardrail_blocked", False):
+                logger.warning("planner_propose_guardrail_blocked")
+                return []
+
+            text = result.text or ""
+            if self._extract_json_object(text) is None:
+                # Keep the head of the raw reply in the log so the failure mode
+                # (truncation vs prose vs empty) is diagnosable after the fact.
+                logger.warning(
+                    "planner_propose_unparseable",
+                    attempt=attempt + 1,
+                    text_chars=len(text),
+                    text_head=text[:300],
+                )
+                if attempt == 0:
+                    continue
+                return []
+            return self._parse_candidates(text)
+        return []
 
     # ── sufficiency + grounded best-guess (Req 6.1-6.2; idea 2) ─────────
 
@@ -597,17 +630,26 @@ class BedrockStepPlanner:
         if not text:
             return None
         candidate = text.strip()
+        # ``strict=False`` admits raw control characters (a literal newline or tab
+        # the model wrote inside its "reasoning" string), which the strict parser
+        # rejects as "Invalid control character" — observed as a 600-character,
+        # otherwise well-formed proposal that was thrown away twice in a row.
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate, strict=False)
             return parsed if isinstance(parsed, dict) else None
         except (ValueError, TypeError):
             pass
         first = candidate.find("{")
         last = candidate.rfind("}")
         if first == -1 or last == -1 or last <= first:
+            logger.warning("planner_json_extract_failed", reason="no_object_delimiters", text_chars=len(candidate))
             return None
         try:
-            parsed = json.loads(candidate[first : last + 1])
-        except (ValueError, TypeError):
+            parsed = json.loads(candidate[first : last + 1], strict=False)
+        except (ValueError, TypeError) as exc:
+            # The decoder's own message names the defect and its position
+            # (unescaped quote, missing comma, truncated string), so the raw-head
+            # log line on the caller is attributable without a second guess.
+            logger.warning("planner_json_extract_failed", reason=str(exc)[:160], text_chars=len(candidate))
             return None
         return parsed if isinstance(parsed, dict) else None
