@@ -1093,3 +1093,26 @@ class TestNLtoSQLStrategyDeadline:
         # ~50ms measured, NOT the multi-second timeout cap. Generous upper bound
         # to stay non-flaky while still excluding any cap-derived value.
         assert 0 <= exec_steps[0].duration_ms < 1000
+
+
+@pytest.mark.unit
+class TestFirewallReceivesEngineDialect:
+    @pytest.mark.asyncio
+    async def test_firewall_evaluate_gets_resolved_dialect(self):
+        """The firewall must parse the generated SQL with the dialect it was generated in."""
+        sql_generator = AsyncMock()
+        sql_generator.generate.return_value = _make_nl_to_sql_result()
+        firewall = MagicMock()
+        firewall.evaluate.return_value = _make_firewall_result()
+        query_executor = AsyncMock()
+        query_executor.resolve_target_dialect = AsyncMock(return_value="tsql")
+        query_executor.execute.return_value = _make_exec_result()
+        strategy = NLtoSQLStrategy(
+            sql_generator=sql_generator, firewall=firewall, query_executor=query_executor, oss_ontology_index="idx"
+        )
+        with patch(
+            "coa_serve.tier2.nl_to_sql.strategy.prepare_execution_sql",
+            new=AsyncMock(return_value=PreparedSQL(sql="SELECT 1", error=None)),
+        ):
+            await strategy.resolve("q", "ns", _make_context())
+        assert firewall.evaluate.call_args.kwargs.get("dialect") == "tsql"

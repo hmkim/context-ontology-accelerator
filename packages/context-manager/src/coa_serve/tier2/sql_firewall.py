@@ -42,6 +42,26 @@ from .cedar_authorizer import CedarAuthorizer, NullCedarAuthorizer, RealCedarAut
 
 logger = structlog.get_logger(__name__)
 
+# sqlglot read-dialect names differ from the NL->SQL prompt-config names in a few
+# places ("postgresql" prompt vs "postgres" parser). Normalise here so a caller
+# may pass either, and an unknown name degrades to the canonical trino parser
+# instead of raising (a ValueError from sqlglot.Dialect would otherwise take the
+# whole request down inside the firewall).
+_DIALECT_ALIASES = {"postgresql": "postgres", "sqlserver": "tsql", "mssql": "tsql", "trino": "trino"}
+
+
+def normalize_dialect(dialect: str | None) -> str:
+    """Return a sqlglot read-dialect name for ``dialect`` (default/unknown -> ``"trino"``)."""
+    name = (dialect or "trino").strip().lower()
+    name = _DIALECT_ALIASES.get(name, name)
+    try:
+        sqlglot.Dialect.get_or_raise(name)
+    except (ValueError, AttributeError):
+        logger.warning("sql_firewall_unknown_dialect", dialect=dialect, using="trino")
+        return "trino"
+    return name
+
+
 _COMMENT_PATTERN = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
 
 _BLOCKED_STATEMENTS = re.compile(
@@ -253,6 +273,7 @@ class SQLFirewall:
             UnsafeSQLError: If SQL is not a safe read-only statement.
         """
         self.check_statement_type(sql)
+        dialect = normalize_dialect(dialect)
         if contains_mysql_executable_comment(sql, dialect):
             raise UnsafeSQLError("MySQL executable comments are not allowed")
 
@@ -351,10 +372,10 @@ class SQLFirewall:
         # a restriction (deny every table), not the absence of one.
         if allowlist is None and not denylist:
             logger.info("sql_firewall_evaluate", decision="allow", restricted=False)
-            return self._apply_cedar(sql, namespace, profile)
+            return self._apply_cedar(sql, namespace, profile, dialect)
 
         # Fail-closed: deny anything we cannot fully analyze for table/column refs.
-        refs = self._analyze_refs(sql)
+        refs = self._analyze_refs(sql, dialect)
         if refs is None:
             return self._deny("Query could not be parsed for authorization")
 
@@ -375,7 +396,7 @@ class SQLFirewall:
                 return self._deny(reason)
 
         logger.info("sql_firewall_evaluate", tables=sorted(refs.tables), decision="allow", restricted=True)
-        return self._apply_cedar(sql, namespace, profile)
+        return self._apply_cedar(sql, namespace, profile, dialect)
 
     def authorize_namespace(self, namespace: str, profile: dict[str, Any] | None = None) -> FirewallResult:
         """Coarse namespace admission gate (Cedar only), independent of any SQL.
@@ -402,7 +423,7 @@ class SQLFirewall:
             return FirewallResult(denied=True, authorized_sql="", reason=reason)
         return FirewallResult(denied=False, authorized_sql="")
 
-    def _apply_cedar(self, sql: str, namespace: str, profile: dict[str, Any]) -> FirewallResult:
+    def _apply_cedar(self, sql: str, namespace: str, profile: dict[str, Any], dialect: str = "trino") -> FirewallResult:
         """Apply the Cedar policy gate as a final authorization step.
 
         Runs AFTER structural checks pass. With the default NullCedarAuthorizer
@@ -411,7 +432,7 @@ class SQLFirewall:
         passed (evaluate() does not currently receive it as a parameter).
         """
         ns = namespace or str(profile.get("namespace", ""))
-        reason = self._cedar_gate(ns, profile, tables=self.extract_tables(sql))
+        reason = self._cedar_gate(ns, profile, tables=self.extract_tables(sql, dialect))
         if reason is not None:
             return self._deny(reason)
         return FirewallResult(denied=False, authorized_sql=sql)
@@ -588,11 +609,14 @@ class SQLFirewall:
                 still succeed.
         """
         try:
-            parsed = sqlglot.parse_one(sql, read=dialect) if dialect else sqlglot.parse_one(sql)
+            # The authorization path passes the source engine's dialect (T-SQL,
+            # MySQL, ...) so engine-dialect SQL parses as the engine reads it;
+            # ``None`` keeps sqlglot's default dialect.
+            parsed = sqlglot.parse_one(sql, read=normalize_dialect(dialect)) if dialect else sqlglot.parse_one(sql)
         except sqlglot.errors.ParseError:
             if log_parse_error:
                 # SQL may carry caller-supplied literal values (potential PII); log length only.
-                logger.warning("sql_firewall_parse_error", sql_len=len(sql))
+                logger.warning("sql_firewall_parse_error", sql_len=len(sql), dialect=dialect)
             return None
         if parsed is None:
             return None
@@ -648,7 +672,7 @@ class SQLFirewall:
         )
 
     @staticmethod
-    def extract_tables(sql: str) -> list[str]:
+    def extract_tables(sql: str, dialect: str = "trino") -> list[str]:
         """Extract table names referenced in a SQL statement via AST parsing.
 
         Uses sqlglot to parse the SQL and walk the AST for Table nodes.
@@ -658,10 +682,10 @@ class SQLFirewall:
         Falls back to an empty list if parsing fails — never raises.
         """
         try:
-            parsed = sqlglot.parse_one(sql, read="trino")
+            parsed = sqlglot.parse_one(sql, read=normalize_dialect(dialect))
         except sqlglot.errors.ParseError:
             # SQL may carry caller-supplied literal values (potential PII); log length only.
-            logger.warning("sql_firewall_parse_error", sql_len=len(sql))
+            logger.warning("sql_firewall_parse_error", sql_len=len(sql), dialect=dialect)
             return []
 
         tables: list[str] = []
