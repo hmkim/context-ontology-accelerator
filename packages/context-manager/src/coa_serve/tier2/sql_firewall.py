@@ -52,7 +52,9 @@ _DIALECT_ALIASES = {"postgresql": "postgres", "sqlserver": "tsql", "mssql": "tsq
 
 def normalize_dialect(dialect: str | None) -> str:
     """Return a sqlglot read-dialect name for ``dialect`` (default/unknown -> ``"trino"``)."""
-    name = (dialect or "trino").strip().lower()
+    if not isinstance(dialect, str) or not dialect.strip():
+        return "trino"
+    name = dialect.strip().lower()
     name = _DIALECT_ALIASES.get(name, name)
     try:
         sqlglot.Dialect.get_or_raise(name)
@@ -499,6 +501,7 @@ class SQLFirewall:
         default_catalog: str,
         schema_only: bool = False,
         selected_source_schemas: frozenset[str] = frozenset(),
+        dialect: str = "trino",
     ) -> bool:
         """Authorize qualified table references against one namespace's sources.
 
@@ -512,7 +515,10 @@ class SQLFirewall:
         shared runtime role can see, including other namespaces' sources.
         """
         try:
-            parsed = sqlglot.parse_one(sql, read="trino")
+            # Athena/Redshift callers pass Trino SQL (the default); the direct-JDBC
+            # route passes the engine dialect the statement was generated in, so a
+            # T-SQL-only statement is verified rather than refused as unparseable.
+            parsed = sqlglot.parse_one(sql, read=normalize_dialect(dialect))
         except sqlglot.errors.ParseError as exc:
             raise NamespaceSQLScopeError("Unable to verify SQL references") from exc
 

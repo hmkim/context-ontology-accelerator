@@ -344,8 +344,8 @@ class NLtoSQLStrategy:
             except Exception as e:
                 logger.warning("dialect_resolution_failed", error=str(e), fallback="athena")
         if not isinstance(dialect, str) or not dialect.strip():
-            # The dialect now reaches sqlglot (firewall), which raises on a
-            # non-string; never let an odd executor return take the arm down.
+            # The dialect now reaches sqlglot (firewall, qualifier, routing), which
+            # raises on a non-string; never let an odd executor return take the arm down.
             dialect = "athena"
 
         evidence = options.get("evidence", "")[:500]
@@ -450,7 +450,7 @@ class NLtoSQLStrategy:
             # extract_tables() output verbatim (see ..table_qualifier). A
             # single-source statement is returned untouched, so the direct-JDBC
             # fast path is unaffected.
-            prepared = await self._prepare_sql(fw_result.authorized_sql, nl_to_sql_result, namespace)
+            prepared = await self._prepare_sql(fw_result.authorized_sql, nl_to_sql_result, namespace, dialect)
             if prepared.error:
                 # A reference that cannot be attributed to ONE physical table — the
                 # same bare name in two sources/schemas. Refuse the query with a
@@ -666,7 +666,9 @@ class NLtoSQLStrategy:
         # clean empty result we saw; otherwise None so the next strategy can try.
         return empty_fallback
 
-    async def _prepare_sql(self, sql: str, nl_result: NLtoSQLResult, namespace: str) -> PreparedSQL:
+    async def _prepare_sql(
+        self, sql: str, nl_result: NLtoSQLResult, namespace: str, dialect: str = "trino"
+    ) -> PreparedSQL:
         """Make ``sql`` executable, qualifying to ``catalog.schema.table`` if cross-source.
 
         Delegates to the shared :func:`~..table_qualifier.prepare_execution_sql`
@@ -699,8 +701,11 @@ class NLtoSQLStrategy:
         # engine without a session default-schema switch (SQL Server). Entries
         # carry only ``sourceSchema`` here (no catalog), so a single-source
         # statement still stays on the direct-JDBC route.
-        routing = sql_table_routing(sql, nl_result.table_sources, table_schemas)
-        return await prepare_execution_sql(sql, routing, self._sources, namespace=namespace)
+        # Parse with the dialect the statement was generated in: under the trino
+        # default a T-SQL-only statement yields no table references, the routing map
+        # comes back empty and the bare names reach the engine unqualified.
+        routing = sql_table_routing(sql, nl_result.table_sources, table_schemas, dialect=dialect)
+        return await prepare_execution_sql(sql, routing, self._sources, namespace=namespace, dialect=dialect)
 
     def _firewall_check(
         self, sql: str, profile: dict, namespace: str, trace, dialect: str = "trino"
