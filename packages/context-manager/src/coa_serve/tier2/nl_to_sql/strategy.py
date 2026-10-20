@@ -37,6 +37,7 @@ from ...clients.base import GraphClient, QueryExecutor
 from ...exceptions import AccessDeniedError, AmbiguousReferenceError
 from ...identity import display_principal
 from ...step_ids import StepId
+from ..mapping_schemas import MappingSchemaResolver
 from ..sql_firewall import FirewallResult, SQLFirewall, UnsafeSQLError, tables_visible_to
 from ..strategy import StrategyContext, StrategyOption, StrategyResult, capped_max_rows
 from ..table_qualifier import PreparedSQL, SourceLookup, prepare_execution_sql
@@ -220,6 +221,7 @@ class NLtoSQLStrategy:
         max_shots: int | None = None,
         graph_client: GraphClient | None = None,
         sources_registry: SourceLookup | None = None,
+        mapping_schemas: MappingSchemaResolver | None = None,
     ):
         """Wire the SQL generator, firewall, executor, and ontology index.
 
@@ -242,6 +244,13 @@ class NLtoSQLStrategy:
                 narrow :class:`~..table_qualifier.SourceLookup` Protocol so a
                 wiring mistake fails type-check rather than surfacing as a runtime
                 AttributeError on the first cross-source statement.
+            mapping_schemas: Optional resolver of the namespace's per-table source
+                schemas (read from the published R2RML, the same mapping the VKG
+                path routes on). With it, a bare table reference in generated SQL
+                is qualified with its real schema before execution — required on
+                SQL Server, which has no ``search_path`` equivalent, whenever the
+                tables live outside the login's default schema. None (or a
+                resolver without a bucket) keeps today's behaviour.
         """
         self._sql_generator = sql_generator
         self._firewall = firewall
@@ -249,6 +258,7 @@ class NLtoSQLStrategy:
         self._oss_ontology_index = oss_ontology_index
         self._graph_client = graph_client
         self._sources = sources_registry
+        self._mapping_schemas = mapping_schemas
         self._max_shots = max_shots if max_shots is not None else _resolve_max_shots()
 
     def _exec_timeout_seconds(self, context: StrategyContext) -> int:
@@ -674,9 +684,18 @@ class NLtoSQLStrategy:
         # no-op UNLESS the hits span two real sources or mark a name ambiguous —
         # ``table_sources_need_preparation`` distinguishes those from the single
         # unambiguous source that needs nothing done.
-        if not table_sources_need_preparation(nl_result.table_sources):
+        table_schemas: dict[str, str] = {}
+        if self._mapping_schemas is not None and self._mapping_schemas.enabled:
+            table_schemas = await self._mapping_schemas.schemas_for(namespace)
+        if not table_schemas and not table_sources_need_preparation(nl_result.table_sources):
             return PreparedSQL(sql=sql)
-        routing = sql_table_routing(sql, nl_result.table_sources)
+        # With per-table schemas known, the single-source path runs through the
+        # preparation too: ``restore_source_schemas`` qualifies every bare reference
+        # with its real schema, which is what lets the statement execute on an
+        # engine without a session default-schema switch (SQL Server). Entries
+        # carry only ``sourceSchema`` here (no catalog), so a single-source
+        # statement still stays on the direct-JDBC route.
+        routing = sql_table_routing(sql, nl_result.table_sources, table_schemas)
         return await prepare_execution_sql(sql, routing, self._sources, namespace=namespace)
 
     def _firewall_check(self, sql: str, profile: dict, namespace: str, trace) -> FirewallResult | None:

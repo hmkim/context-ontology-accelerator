@@ -255,8 +255,9 @@ _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
             "prefix (invalid in T-SQL)\n"
             "- Row limiting: SELECT TOP n ... (LIMIT is invalid; OFFSET/FETCH requires ORDER BY). "
             "Where a rule above says LIMIT 1, write SELECT TOP 1\n"
-            "- Qualify every table as schema.table exactly as shown in the schema context "
-            "(e.g. sales.orders); never add a database name (no three-part names)\n"
+            "- Reference each table EXACTLY as it is named in the schema context; do not add a "
+            "schema or database prefix the context does not show (never dbo., never a three-part "
+            "name) — schema qualification is applied automatically before execution\n"
             "- Use DECIMAL for decimals, VARCHAR/NVARCHAR for strings; integer division truncates, "
             "so CAST to DECIMAL before dividing for rates/percentages\n"
             "- String concatenation: use CONCAT() function or +, not || operator"
@@ -265,8 +266,8 @@ _DIALECT_CONFIGS: dict[str, dict[str, str]] = {
             "SELECT\n"
             "  c.region,\n"
             "  COALESCE(SUM(o.total), 0) AS total_revenue\n"
-            "FROM sales.orders o\n"
-            "JOIN sales.customers c ON o.customer_id = c.id\n"
+            "FROM orders o\n"
+            "JOIN customers c ON o.customer_id = c.id\n"
             "WHERE o.order_date >= CAST('2024-01-01' AS DATE)\n"
             "  AND o.order_date < CAST('2025-01-01' AS DATE)\n"
             "GROUP BY c.region\n"
@@ -1254,7 +1255,11 @@ def table_sources_need_preparation(table_sources: dict[str, str]) -> bool:
     return len(real) >= 2 or _AMBIGUOUS_SOURCE in values
 
 
-def sql_table_routing(sql: str, table_sources: dict[str, str]) -> dict[str, dict[str, str]]:
+def sql_table_routing(
+    sql: str,
+    table_sources: dict[str, str],
+    table_schemas: dict[str, str] | None = None,
+) -> dict[str, dict[str, str]]:
     """Build a ``datasourceRouting``-shaped map for the tables ``sql`` references.
 
     Same shape as the VKG translate response's ``datasourceRouting``, so the
@@ -1271,9 +1276,15 @@ def sql_table_routing(sql: str, table_sources: dict[str, str]) -> dict[str, dict
     run it against a guessed schema and return a wrong answer as success.
     Dropping the name instead — as an earlier version did — left it
     indistinguishable from a table outside the map, i.e. nothing to route, so the
-    query executed unqualified. Attributed entries carry no ``sourceSchema``
-    (retrieval hits have none), so the qualifier falls back to the per-source
-    schema.
+    query executed unqualified.
+
+    Retrieval hits carry no schema, so an attributed entry has no ``sourceSchema``
+    unless the caller passes ``table_schemas`` (``{bare_table: schema}``, read
+    from the namespace's published R2RML by
+    :class:`~..mapping_schemas.MappingSchemaResolver`). With it, the entry carries
+    the SAME per-table schema the VKG path uses, so ``restore_source_schemas`` can
+    qualify a bare reference exactly instead of the qualifier falling back to the
+    per-source schema (wrong for a source spanning several schemas).
     """
     routing: dict[str, dict[str, str]] = {}
     if not table_sources:
@@ -1286,7 +1297,11 @@ def sql_table_routing(sql: str, table_sources: dict[str, str]) -> dict[str, dict
         if ds_id == _AMBIGUOUS_SOURCE:
             routing[bare] = {AMBIGUOUS_KEY: bare}
             continue
-        routing[bare] = {"datasourceId": ds_id}
+        entry = {"datasourceId": ds_id}
+        schema = (table_schemas or {}).get(bare)
+        if schema:
+            entry["sourceSchema"] = schema
+        routing[bare] = entry
     return routing
 
 
