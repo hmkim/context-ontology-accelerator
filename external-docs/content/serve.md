@@ -20,7 +20,10 @@ The built-in Playground provides an interactive chat interface:
 The Playground streams responses in real-time via SSE (Server-Sent Events), showing:
 
 - **Resolution steps**: which strategy is being tried
-- **Generated SQL**: the query produced for your data
+- **Generated SQL** (when the **Show generated SQL** toggle is on): the query
+  produced for your data, in the answer's *Compiled artifacts* drawer and on the
+  trace detail page. The toggle sends `options.includeDebugInfo` (see below) and is
+  off by default because the executed SQL / SPARQL reveals table and column names
 - **Results**: tables, summaries, or explanations
 - **Conversation history**: multi-turn context within a session
 

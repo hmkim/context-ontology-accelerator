@@ -31,16 +31,30 @@ import { useTokenBuffer } from "./use-token-buffer";
  * `...(mode && { options: { mode } })` followed by the same for `strategy` would
  * have the second overwrite the first — both assign the whole `options` key.
  *
+ * `includeDebugInfo` is sent only when true. Serve withholds `queryUsed` /
+ * `sparqlGenerated` unless the caller opts in (they expose table and column
+ * names), so the key is omitted — not sent as `false` — when the user has not
+ * asked for the compiled artifacts; the request is then byte-identical to one
+ * built before this option existed.
+ *
  * Exported for test: the Playground page test mocks this whole hook, so there is
  * no other coverage of the request shape.
  */
 export function buildOptions(
   mode?: ExecutionMode,
   strategy?: QueryStrategy,
-): { options?: { mode?: ExecutionMode; strategy?: QueryStrategy } } {
+  includeDebugInfo?: boolean,
+): {
+  options?: {
+    mode?: ExecutionMode;
+    strategy?: QueryStrategy;
+    includeDebugInfo?: true;
+  };
+} {
   const options = {
     ...(mode && { mode }),
     ...(strategy && { strategy }),
+    ...(includeDebugInfo === true && { includeDebugInfo: true as const }),
   };
   return Object.keys(options).length > 0 ? { options } : {};
 }
@@ -63,11 +77,13 @@ export interface UsePlaygroundChatSSEReturn {
     query: string,
     mode?: ExecutionMode,
     strategy?: QueryStrategy,
+    includeDebugInfo?: boolean,
   ) => void;
   retryQuery: (
     message: ChatMessage,
     mode?: ExecutionMode,
     strategy?: QueryStrategy,
+    includeDebugInfo?: boolean,
   ) => void;
   newChat: () => void;
   hasMoreHistory: boolean;
@@ -203,7 +219,12 @@ export function usePlaygroundChatSSE({
   // ── Public API ──
 
   const sendQuery = useCallback(
-    (query: string, mode?: ExecutionMode, strategy?: QueryStrategy) => {
+    (
+      query: string,
+      mode?: ExecutionMode,
+      strategy?: QueryStrategy,
+      includeDebugInfo?: boolean,
+    ) => {
       if (!namespaceId || isStreaming || sessions.isRestoring) return;
 
       const requestId = crypto.randomUUID();
@@ -216,14 +237,19 @@ export function usePlaygroundChatSSE({
         namespace: namespaceId,
         requestId,
         sessionId: sessions.getSessionId() ?? undefined,
-        ...buildOptions(mode, strategy),
+        ...buildOptions(mode, strategy, includeDebugInfo),
       });
     },
     [namespaceId, submit, sessions, isStreaming],
   );
 
   const retryQuery = useCallback(
-    (message: ChatMessage, mode?: ExecutionMode, strategy?: QueryStrategy) => {
+    (
+      message: ChatMessage,
+      mode?: ExecutionMode,
+      strategy?: QueryStrategy,
+      includeDebugInfo?: boolean,
+    ) => {
       if (!namespaceId || message.role !== "assistant") return;
       if (message.isLoading || isStreaming) return;
       if (!message.replyToId) return;
@@ -241,7 +267,7 @@ export function usePlaygroundChatSSE({
         namespace: namespaceId,
         requestId,
         sessionId: sessions.getSessionId() ?? undefined,
-        ...buildOptions(mode, strategy),
+        ...buildOptions(mode, strategy, includeDebugInfo),
       });
     },
     [namespaceId, submit, sessions, isStreaming],
