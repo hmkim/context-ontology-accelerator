@@ -643,6 +643,78 @@ class TestSnowflakeDialect:
 
 
 @pytest.mark.unit
+class TestSqlServerDialect:
+    """SQL Server constraint discovery must not use the PostgreSQL-only ANSI FK join.
+
+    ``INFORMATION_SCHEMA.KEY_COLUMN_USAGE`` on SQL Server has no
+    ``position_in_unique_constraint`` column, so the inherited FK statement fails
+    to compile on every SQL Server database and ``_safe_constraints`` dropped PK
+    and FK alike. The dialect reads ``sys.key_constraints`` /
+    ``sys.foreign_key_columns`` instead.
+    """
+
+    @staticmethod
+    def _responder(sql, p):
+        if "sys.key_constraints" in sql:
+            return [("order_items", "order_id"), ("order_items", "line_no"), ("orders", "id")]
+        if "sys.foreign_key_columns" in sql:
+            return [
+                ("order_items", "order_id", "orders", "id"),
+                ("order_items", "sku_id", "skus", "sku_id"),
+                ("order_items", "sku_rev", "skus", "rev"),
+            ]
+        return []
+
+    def test_fetch_constraints_uses_sys_catalog_not_ansi_fk_join(self):
+        conn = _Conn(self._responder)
+        pk, fk = SqlServerDialect().fetch_constraints(conn, "sales", ["orders", "order_items"])
+
+        assert pk == {"order_items": ["order_id", "line_no"], "orders": ["id"]}
+        assert fk == {
+            "order_items": [
+                ("order_id", "orders", "id"),
+                ("sku_id", "skus", "sku_id"),
+                ("sku_rev", "skus", "rev"),
+            ]
+        }
+        sqls = [s.lower() for s, _p in conn.cursor_obj.calls]
+        assert len(sqls) == 2
+        # The PostgreSQL-only column that made the inherited query fail on SQL Server.
+        assert not any("position_in_unique_constraint" in s for s in sqls)
+        assert not any("information_schema" in s for s in sqls)
+        assert any("sys.foreign_key_columns" in s for s in sqls)
+        # Composite FKs are paired by position, never by a cartesian join.
+        fk_sql = next(s for s in sqls if "sys.foreign_key_columns" in s)
+        assert "fkc.constraint_column_id" in fk_sql
+        assert "fkc.referenced_column_id" in fk_sql
+
+    def test_fetch_constraints_binds_schema_and_tables_as_parameters(self):
+        conn = _Conn(self._responder)
+        SqlServerDialect().fetch_constraints(conn, "sales", ["orders", "order_items"])
+
+        for sql, params in conn.cursor_obj.calls:
+            assert params == ("sales", "orders", "order_items")
+            assert "sales" not in sql and "order_items" not in sql
+            assert sql.count("%s") == 3
+
+    def test_cross_schema_fk_target_is_bare_table_name(self):
+        # hosp.pt_master.person_id -> cdm.person.person_id: the referenced table is
+        # returned by bare name, matching the contract of every other dialect.
+        def responder(sql, p):
+            if "sys.foreign_key_columns" in sql:
+                return [("pt_master", "person_id", "person", "person_id")]
+            return []
+
+        pk, fk = SqlServerDialect().fetch_constraints(_Conn(responder), "hosp", ["pt_master"])
+        assert pk == {}
+        assert fk == {"pt_master": [("person_id", "person", "person_id")]}
+
+    def test_fetch_constraints_empty_tables_no_query(self):
+        conn = _Conn(lambda sql, p: pytest.fail("must not query"))
+        assert SqlServerDialect().fetch_constraints(conn, "dbo", []) == ({}, {})
+
+
+@pytest.mark.unit
 class TestOracleDialect:
     def test_list_schemas_uses_all_users(self):
         conn = _Conn(lambda sql, p: [("HR",), ("SALES",)] if "all_users" in sql else [])
