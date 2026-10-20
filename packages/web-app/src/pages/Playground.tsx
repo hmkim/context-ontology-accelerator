@@ -18,6 +18,7 @@ import {
   SegmentedControl,
   SpaceBetween,
   StatusIndicator,
+  Toggle,
 } from "@cloudscape-design/components";
 import { RuntimeConfigContext } from "@components/RuntimeContext";
 import { useCurrentNamespace } from "@components/NamespaceProvider";
@@ -64,6 +65,11 @@ export const Playground: React.FC = () => {
   // Sent as options.mode on every query. Defaults to "standard" to match serve's
   // deployment default; deep reasoning (~140s p50 vs ~30s) is opt-in via the toggle.
   const [mode, setMode] = useState<ExecutionMode>("standard");
+  // Sent as options.includeDebugInfo (only when true). Serve withholds the
+  // executed SQL / SPARQL unless the request opts in, because they expose table
+  // and column names — so the Playground's "Compiled artifacts" drawer stays
+  // empty until the user turns this on. Off by default to match serve's default.
+  const [showSql, setShowSql] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<
     ChatMessageType | undefined
   >();
@@ -110,7 +116,7 @@ export const Playground: React.FC = () => {
   const handleSubmit = () => {
     const query = inputValue.trim();
     if (!query || !namespaceId) return;
-    sendQuery(query, mode);
+    sendQuery(query, mode, undefined, showSql);
     setInputValue("");
     // Scroll to bottom after sending a query (user expects to see their message)
     requestAnimationFrame(() => {
@@ -121,10 +127,10 @@ export const Playground: React.FC = () => {
   const handleSamplePrompt = useCallback(
     (question: string) => {
       if (!namespaceId) return;
-      sendQuery(question, mode);
+      sendQuery(question, mode, undefined, showSql);
       setInputValue("");
     },
-    [namespaceId, sendQuery, mode],
+    [namespaceId, sendQuery, mode, showSql],
   );
 
   const findUserQuery = useCallback(
@@ -227,6 +233,12 @@ export const Playground: React.FC = () => {
               label="Execution mode"
               options={EXECUTION_MODE_OPTIONS}
             />
+            <Toggle
+              checked={showSql}
+              onChange={({ detail }) => setShowSql(detail.checked)}
+            >
+              Show generated SQL
+            </Toggle>
             <Button
               variant="normal"
               onClick={newChat}
@@ -327,7 +339,7 @@ export const Playground: React.FC = () => {
                   key={msg.id}
                   onRetry={
                     msg.role === "assistant" && !msg.isLoading
-                      ? () => retryQuery(msg, mode)
+                      ? () => retryQuery(msg, mode, undefined, showSql)
                       : undefined
                   }
                 >
@@ -356,7 +368,7 @@ export const Playground: React.FC = () => {
                     }
                     onRetry={
                       msg.role === "assistant" && msg.error
-                        ? () => retryQuery(msg, mode)
+                        ? () => retryQuery(msg, mode, undefined, showSql)
                         : undefined
                     }
                     stage={msg.stage}

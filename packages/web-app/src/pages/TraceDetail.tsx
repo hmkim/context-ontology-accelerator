@@ -276,7 +276,10 @@ export function TraceDetail() {
             )}
             {!displaySparql && !displaySql && (
               <Box color="text-body-secondary">
-                No compiled artifacts for this request.
+                No compiled artifacts for this request. Serve returns the
+                executed SQL and SPARQL only when the request opts in — turn on{" "}
+                <em>Show generated SQL</em> in the Playground before asking.
+                Tier 3 answers have no compiled artifact.
               </Box>
             )}
           </SpaceBetween>

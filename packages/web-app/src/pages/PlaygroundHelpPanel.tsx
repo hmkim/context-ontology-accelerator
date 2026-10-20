@@ -70,7 +70,10 @@ export const PlaygroundHelpPanel: React.FC = () => (
       </li>
       <li>
         <strong>Demo 2.</strong> "show me all claims with amount greater than
-        10000" — Tier 2 with compiled SPARQL + SQL drawer.
+        10000" — Tier 2 with compiled SPARQL + SQL drawer. Turn on{" "}
+        <em>Show generated SQL</em> first: serve returns the executed SQL and
+        SPARQL only when the request opts in, because they expose table and
+        column names.
       </li>
       <li>
         <strong>Demo 2 fallback.</strong> "list all customers in northeast

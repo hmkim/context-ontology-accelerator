@@ -44,4 +44,28 @@ describe("buildOptions", () => {
     // would fail to match and silently resolve to its default.
     expect(buildOptions("" as never, "" as never)).toEqual({});
   });
+
+  it("sends includeDebugInfo only when true", () => {
+    // Serve withholds queryUsed / sparqlGenerated unless the caller opts in, so
+    // the flag must reach the API as a literal `true` ...
+    expect(buildOptions("standard", undefined, true)).toEqual({
+      options: { mode: "standard", includeDebugInfo: true },
+    });
+    // ... and alone it still produces an options object.
+    expect(buildOptions(undefined, undefined, true)).toEqual({
+      options: { includeDebugInfo: true },
+    });
+  });
+
+  it("omits includeDebugInfo when false or unset, keeping the old request shape", () => {
+    // `false` is the serve default; sending it would change the wire shape of
+    // every request for no behavioural gain, so the key is dropped instead.
+    expect(buildOptions("standard", undefined, false)).toEqual({
+      options: { mode: "standard" },
+    });
+    expect(buildOptions(undefined, undefined, false)).toEqual({});
+    expect(buildOptions("deep-reasoning", "ontop", undefined)).toEqual({
+      options: { mode: "deep-reasoning", strategy: "ontop" },
+    });
+  });
 });
