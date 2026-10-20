@@ -31,6 +31,7 @@ def _tbl(name: str, cols: list[CatalogColumn]) -> CatalogTable:
 def test_duplicate_induction_sets_duplicate_of_on_inmemory_job() -> None:
     from coa_ontology.induce_catalog import (
         WorkbenchInductionRequest,
+        _compute_curation_fingerprint,
         _compute_structural_fingerprint,
         _jobs,
         _run_induction,
@@ -41,12 +42,16 @@ def test_duplicate_induction_sets_duplicate_of_on_inmemory_job() -> None:
     _jobs["job-dup"] = job
 
     tables = [_tbl("customers", [CatalogColumn(name="id", dataType="INTEGER")])]
-    fingerprint = _compute_structural_fingerprint(tables)
 
+    # A duplicate needs both the structural and the curation fingerprint to match
+    # (see _is_duplicate_of); a row with only the structural one is not one.
     existing_accepted = {
         "proposal_id": "accepted-proposal-123",
         "ontology_id": "http://test.org/ontology/induced#",
-        "metadata": {"structural_fingerprint": fingerprint},
+        "metadata": {
+            "structural_fingerprint": _compute_structural_fingerprint(tables),
+            "curation_fingerprint": _compute_curation_fingerprint(tables),
+        },
     }
 
     body = WorkbenchInductionRequest(
