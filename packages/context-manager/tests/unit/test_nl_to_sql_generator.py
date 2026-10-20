@@ -21,6 +21,7 @@ from coa_serve.tier2.nl_to_sql.sql_generator import (
     _resolve_data_source_from_hits,
     _resolve_data_source_from_sql,
     build_fk_adjacency,
+    resolve_dialect_key,
     sql_table_routing,
     table_sources_need_preparation,
 )
@@ -389,6 +390,46 @@ class TestDialectSupport:
     def test_unknown_dialect_falls_back_to_athena(self):
         gen = SQLGenerator(llm_client=AsyncMock(), vector_client=AsyncMock(), dialect="unknown")
         assert "Trino/Presto" in gen._system_prompt
+
+    def test_tsql_dialect_in_prompt(self):
+        # SQL Server source: the adapter registry resolves "tsql" (sqlglot name). Before
+        # the config existed this fell back to the Trino prompt, so every first shot
+        # with a date filter failed on SQL Server (DATE '...' literal / LIMIT).
+        gen = SQLGenerator(llm_client=AsyncMock(), vector_client=AsyncMock(), dialect="tsql")
+        p = gen._system_prompt
+        assert "SQL Server" in p and "T-SQL" in p
+        assert "CAST('2024-01-01' AS DATE)" in p
+        assert "TOP" in p
+        assert "DATE '2024-01-01'" not in p
+        assert "Trino" not in p and "Athena" not in p
+
+    def test_sqlglot_adapter_names_resolve_to_configs(self):
+        # EngineAdapter.sqlglot_dialect values ("postgres", "redshift", "mysql", "tsql")
+        # are what the strategy passes in; each must land on its own rules, not Athena.
+        assert resolve_dialect_key("postgres") == "postgresql"
+        assert resolve_dialect_key("postgresql") == "postgresql"
+        assert resolve_dialect_key("redshift") == "redshift"
+        assert resolve_dialect_key("mysql") == "mysql"
+        assert resolve_dialect_key("tsql") == "tsql"
+        assert resolve_dialect_key("sqlserver") == "tsql"
+        assert resolve_dialect_key("TSQL") == "tsql"
+        assert resolve_dialect_key("trino") == "athena"
+        assert resolve_dialect_key("athena") == "athena"
+        assert resolve_dialect_key("") == "athena"
+        assert resolve_dialect_key(None) == "athena"
+        assert resolve_dialect_key("unknown") == "athena"
+
+    def test_postgres_sqlglot_name_gets_postgresql_prompt(self):
+        gen = SQLGenerator(llm_client=AsyncMock(), vector_client=AsyncMock(), dialect="postgres")
+        assert "PostgreSQL" in gen._system_prompt
+        assert "Trino" not in gen._system_prompt
+
+    def test_mysql_and_redshift_dialects_in_prompt(self):
+        gen = SQLGenerator(llm_client=AsyncMock(), vector_client=AsyncMock(), dialect="mysql")
+        assert "MySQL" in gen._system_prompt and "DATE_FORMAT" in gen._system_prompt
+        assert "'2024-01-01'::date" not in gen._system_prompt  # example SQL carries no PG casts
+        gen = SQLGenerator(llm_client=AsyncMock(), vector_client=AsyncMock(), dialect="redshift")
+        assert "Redshift" in gen._system_prompt
 
     def test_output_shape_conventions_in_prompt(self):
         # BIRD-aligned output-shape rules (measured +3.2pp): exact columns, zero-padded
@@ -802,6 +843,26 @@ class TestSQLGeneratorCorrect:
             model_id="us.anthropic.claude-opus-4-8",
         )
         assert mock_llm.converse.call_args.kwargs["model_id"] == "us.anthropic.claude-opus-4-8"
+
+    @pytest.mark.asyncio
+    async def test_correct_uses_per_request_dialect_prompt(self, mock_llm, mock_vector):
+        """The correction shot must run under the SAME dialect prompt as the first shot.
+
+        Regression: with an Athena instance default and a tsql per-request dialect, the
+        correction was prompted with the Trino rules, so a SQL Server first-shot failure
+        on ``DATE '...'`` was "corrected" into more Trino SQL.
+        """
+        generator = SQLGenerator(llm_client=mock_llm, vector_client=mock_vector, dialect="athena")
+        await generator.correct("q", "ddl", failed_sql="SELECT 1", execution_error="boom", dialect="tsql")
+        system_prompt = mock_llm.converse.call_args.kwargs["system"]
+        assert "T-SQL" in system_prompt
+        assert "Trino" not in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_correct_without_dialect_uses_instance_default(self, mock_llm, mock_vector):
+        generator = SQLGenerator(llm_client=mock_llm, vector_client=mock_vector, dialect="postgresql")
+        await generator.correct("q", "ddl", failed_sql="SELECT 1", execution_error="boom")
+        assert "PostgreSQL" in mock_llm.converse.call_args.kwargs["system"]
 
 
 @pytest.mark.unit
