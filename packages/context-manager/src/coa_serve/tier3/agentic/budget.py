@@ -132,6 +132,18 @@ class BudgetClock:
         usable = self.remaining_s() - self._config.synthesis_reserve_s
         return max(_MIN_TOOL_TIMEOUT_S, min(per_tool_timeout_s, usable))
 
+    def tool_time_exhausted(self, min_useful_s: float = 1.0) -> bool:
+        """True when the next tool could get less than ``min_useful_s`` of wall clock.
+
+        ``tool_deadline_s`` floors the timeout at an epsilon, so once the budget
+        minus the synthesis reserve is spent every further step is a planner call
+        (several seconds of LLM time) followed by a tool that times out after 1 ms.
+        Observed as 3-5 such tail steps per deep-reasoning session. The controller
+        checks this before starting a step so the remaining wall clock goes to
+        synthesis instead. Independent of ``expired`` (the hard Time_Budget edge).
+        """
+        return (self.remaining_s() - self._config.synthesis_reserve_s) < min_useful_s
+
     def expired(self) -> bool:
         """True once the elapsed time reaches the Time_Budget boundary (Req 7.4).
 

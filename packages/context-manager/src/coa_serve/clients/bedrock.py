@@ -315,6 +315,7 @@ class BedrockLLMClient:
         embed_model_id: str | None = None,
         region: str | None = None,
         guardrail_version: str | None = None,
+        additional_model_request_fields: dict[str, Any] | None = None,
     ):
         """Configure the client's model, embedder, region, and guardrail version.
 
@@ -326,6 +327,14 @@ class BedrockLLMClient:
             region: AWS region. Defaults to ``BEDROCK_REGION`` then the resolved region.
             guardrail_version: Guardrail version to apply. Defaults to
                 ``BEDROCK_GUARDRAIL_VERSION`` then ``"DRAFT"``.
+            additional_model_request_fields: Model-specific request fields sent
+                verbatim as Converse ``additionalModelRequestFields`` on EVERY call
+                of this client (e.g. ``{"thinking": {"type": "disabled"}}`` to turn
+                off adaptive thinking on Claude 5-class models, which is ON by
+                default even when the field is omitted). Client-level on purpose:
+                it describes how a *role* (planner vs synthesizer) should use its
+                model, not a per-prompt choice. ``None``/empty sends nothing, which
+                is the prior behaviour.
         """
         self._model_id = model_id or os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5")
         self._embed_model_id = embed_model_id or os.environ.get("BEDROCK_EMBED_MODEL_ID", DEFAULT_EMBED_MODEL_ID)
@@ -334,6 +343,7 @@ class BedrockLLMClient:
         # model (and Cohere search_query input_type) as ingestion.
         self._embedder = BedrockEmbedder(model_id=self._embed_model_id, region=self._region)
         self._guardrail_version = guardrail_version or os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT")
+        self._additional_model_request_fields: dict[str, Any] = dict(additional_model_request_fields or {})
         self._client: Any = None
         self._client_lock = threading.Lock()
         logger.info(
@@ -341,6 +351,7 @@ class BedrockLLMClient:
             model_id=self._model_id,
             embed_model_id=self._embed_model_id,
             region=self._region,
+            additional_model_request_fields=sorted(self._additional_model_request_fields) or None,
         )
 
     @property
@@ -844,6 +855,10 @@ class BedrockLLMClient:
         }
         if system:
             kwargs["system"] = [{"text": system}]
+        if self._additional_model_request_fields:
+            # Copied so a caller mutating the returned kwargs cannot alter the
+            # client-level defaults for later calls.
+            kwargs["additionalModelRequestFields"] = dict(self._additional_model_request_fields)
         if guardrail_id:
             kwargs["guardrailConfig"] = {
                 "guardrailIdentifier": guardrail_id,

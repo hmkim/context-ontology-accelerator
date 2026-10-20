@@ -1071,3 +1071,79 @@ describe("ServeStack - LLM output-token budgets", () => {
     }
   });
 });
+
+describe("ServeStack - deep-reasoning planner model knobs", () => {
+  const knobs = [
+    "DEEP_REASONING_PLANNER_MODEL_ID",
+    "DEEP_REASONING_PLANNER_THINKING",
+    "DEEP_REASONING_PLANNER_MAX_TOKENS",
+  ];
+
+  it("sets none of the planner variables unless its context key is passed", () => {
+    // Absent means the planner reuses the query model client (prior behaviour);
+    // the stack must not pin a model id that would shadow BEDROCK_MODEL_ID.
+    const runtimes = createStack().findResources(
+      "AWS::BedrockAgentCore::Runtime",
+    );
+    for (const runtime of Object.values(runtimes)) {
+      for (const knob of knobs) {
+        expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+          knob,
+        );
+      }
+    }
+  });
+
+  it("passes the planner model, thinking mode and token cap through", () => {
+    createStack({
+      deep_reasoning_planner_model_id: "global.anthropic.claude-haiku-5-5",
+      deep_reasoning_planner_thinking: "disabled",
+      deep_reasoning_planner_max_tokens: 2048,
+    }).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DEEP_REASONING_PLANNER_MODEL_ID: "global.anthropic.claude-haiku-5-5",
+        DEEP_REASONING_PLANNER_THINKING: "disabled",
+        DEEP_REASONING_PLANNER_MAX_TOKENS: "2048",
+      }),
+    });
+  });
+
+  it("exposes the reasoning-step cap only when deep_reasoning_max_steps is passed", () => {
+    for (const runtime of Object.values(
+      createStack().findResources("AWS::BedrockAgentCore::Runtime"),
+    )) {
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "DEEP_REASONING_MAX_STEPS",
+      );
+    }
+    createStack({ deep_reasoning_max_steps: 16 }).hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      {
+        EnvironmentVariables: Match.objectLike({
+          DEEP_REASONING_MAX_STEPS: "16",
+        }),
+      },
+    );
+  });
+
+  it("sets each planner knob independently of the others", () => {
+    const template = createStack({
+      deep_reasoning_planner_model_id: "global.anthropic.claude-haiku-5-5",
+    });
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        DEEP_REASONING_PLANNER_MODEL_ID: "global.anthropic.claude-haiku-5-5",
+      }),
+    });
+    for (const runtime of Object.values(
+      template.findResources("AWS::BedrockAgentCore::Runtime"),
+    )) {
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "DEEP_REASONING_PLANNER_THINKING",
+      );
+      expect(runtime.Properties.EnvironmentVariables).not.toHaveProperty(
+        "DEEP_REASONING_PLANNER_MAX_TOKENS",
+      );
+    }
+  });
+});
